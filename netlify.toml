@@ -1,0 +1,35 @@
+# ──────────────────────────────────────────────────────────────────
+#  VinylVault — Netlify deployment configuration
+#  URL: https://rainbow-wisp-de0cdd.netlify.app/
+# ──────────────────────────────────────────────────────────────────
+
+[build]
+  publish = "."
+
+# ── REDIRECTS ─────────────────────────────────────────────────────
+# Serve VinylVault.html when the root or any unknown path is requested,
+# so the app is accessible at https://rainbow-wisp-de0cdd.netlify.app/
+[[redirects]]
+  from   = "/"
+  to     = "/VinylVault.html"
+  status = 200   # rewrite (not a 301) — URL stays as /
+
+# ── HEADERS ───────────────────────────────────────────────────────
+# Applied to the main HTML file — no restrictive CSP so that
+# YouTube iframes, Discogs API calls, Tesseract.js (CDN) and
+# Google Identity Services all work without issues.
+[[headers]]
+  for = "/VinylVault.html"
+  [headers.values]
+    Cache-Control            = "no-cache, no-store, must-revalidate"
+    X-Frame-Options          = "DENY"
+    X-Content-Type-Options   = "nosniff"
+    Referrer-Policy          = "strict-origin-when-cross-origin"
+    # Permissions policy: allow autoplay for YouTube embeds
+    Permissions-Policy       = "autoplay=*, fullscreen=*"
+
+# Allow cross-origin images (Discogs CDN cover art)
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Access-Control-Allow-Origin = "*"
