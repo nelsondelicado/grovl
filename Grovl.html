@@ -1651,6 +1651,34 @@ async function ytSearch(query) {
   return d.items?.[0]?.id?.videoId || null;
 }
 
+// Smart album search — scores results by artist/album relevance, prefers full-album uploads
+async function ytSearchAlbum(artist, album) {
+  const key = state.settings.ytApiKey;
+  if (!key) throw new Error('YouTube API Key not set. Add it in Settings.');
+  const query = `${artist} ${album} full album`;
+  const url = `${YTAPI}/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=8&key=${encodeURIComponent(key)}`;
+  const r = await fetch(url);
+  const d = await r.json();
+  if (d.error) throw new Error('YouTube: ' + d.error.message);
+  const items = d.items || [];
+  const artistN = artist.toLowerCase();
+  const albumN  = album.toLowerCase();
+  let best = null, bestScore = -1;
+  for (const item of items) {
+    const vid = item.id?.videoId; if (!vid) continue;
+    const vt  = (item.snippet?.title || '').toLowerCase();
+    const ch  = (item.snippet?.channelTitle || '').toLowerCase();
+    let score = 0;
+    if (vt.includes(albumN))  score += 5;
+    if (vt.includes(artistN)) score += 3;
+    if (ch.includes(artistN)) score += 2;
+    if (/\b(full\s*album|complete\s*album|full\s*lp|vinyl\s*rip|side\s*[ab12])\b/i.test(item.snippet?.title || '')) score += 2;
+    if (/\b(topic|official\s*(audio|music))\b/i.test(item.snippet?.title || '')) score += 1;
+    if (score > bestScore) { bestScore = score; best = vid; }
+  }
+  return best || items[0]?.id?.videoId || null;
+}
+
 // Smarter YouTube search for DJ set individual tracks.
 // Fetches 6 results, scores each by relevance, skips full-album videos.
 async function ytSearchDJTrack(artist, trackTitle) {
@@ -1724,8 +1752,7 @@ async function findAllAlbumVideos() {
     msg.textContent = `${rec.artist} – ${rec.title}`;
     bar.style.width = `${Math.round((done / missing.length) * 100)}%`;
     try {
-      const query = `${rec.artist} ${rec.title} full album vinyl`;
-      const vid = await ytSearch(query);
+      const vid = await ytSearchAlbum(rec.artist, rec.title);
       if (vid) { rec.ytVideoId = vid; found++; save(); }
       done++;
     } catch(e) {
@@ -2180,10 +2207,18 @@ function showDetail(recId) {
           allowfullscreen allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
           loading="lazy" style="width:100%;aspect-ratio:16/9;border:none;display:block;"></iframe>
        </div>`
-    : `<div id="cat-player-container" style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.5rem;">
-        <a class="yt-search-btn" href="${esc(ytMusicUrl(r.artist, r.title))}" target="_blank">🎵 Search on YouTube Music</a>
-        <a class="yt-search-btn" href="${esc(ytSearchUrl(r.artist, r.title + ' full album'))}" target="_blank">🎬 Search on YouTube</a>
-        ${state.settings.ytApiKey ? `<button class="btn btn-secondary btn-sm" onclick="fetchAndShowVideo('${r.id}')">🔍 Find &amp; Load Video</button>` : ''}
+    : `<div id="cat-player-container" style="margin-top:0.5rem;">
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.65rem;">
+          <a class="yt-search-btn" href="${esc(ytMusicUrl(r.artist, r.title))}" target="_blank">🎵 Search on YouTube Music</a>
+          <a class="yt-search-btn" href="${esc(ytSearchUrl(r.artist, r.title + ' full album'))}" target="_blank">🎬 Search on YouTube</a>
+          ${state.settings.ytApiKey ? `<button class="btn btn-secondary btn-sm" onclick="fetchAndShowVideo('${r.id}')">🔍 Find &amp; Load Video</button>` : ''}
+        </div>
+        <div style="display:flex;gap:0.5rem;align-items:center;">
+          <input id="yt-manual-url" type="text" placeholder="Paste YouTube URL or video ID…"
+            style="flex:1;padding:0.45rem 0.7rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--text);font-size:0.85rem;"
+            onkeydown="if(event.key==='Enter')linkManualYT('${r.id}')">
+          <button class="btn btn-secondary btn-sm" onclick="linkManualYT('${r.id}')">Link</button>
+        </div>
       </div>`;
 
   document.getElementById('detail-body').innerHTML = `
@@ -2294,14 +2329,30 @@ async function fetchSingleTracklist(recId) {
   } catch(e) { toast(e.message, 'error'); }
 }
 
+function linkManualYT(recId) {
+  const rec = state.collection.find(r => r.id === recId);
+  if (!rec) return;
+  const raw = (id('yt-manual-url')?.value || '').trim();
+  if (!raw) { toast('Paste a YouTube URL or video ID first', 'error'); return; }
+  // Extract videoId from full URL or bare ID
+  let vid = raw;
+  try {
+    const u = new URL(raw);
+    vid = u.searchParams.get('v') || u.pathname.split('/').pop() || raw;
+  } catch(_) { /* raw is already a videoId */ }
+  vid = vid.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 11);
+  if (vid.length < 5) { toast('Invalid YouTube URL or video ID', 'error'); return; }
+  rec.ytVideoId = vid; save(); toast('YouTube video linked!', 'yt'); showDetail(recId);
+}
+
 async function fetchAndShowVideo(recId) {
   const rec = state.collection.find(r => r.id === recId);
   if (!rec) return;
   toast('Searching YouTube…', 'info');
   try {
-    const vid = await ytSearch(`${rec.artist} ${rec.title} full album vinyl`);
+    const vid = await ytSearchAlbum(rec.artist, rec.title);
     if (vid) { rec.ytVideoId = vid; save(); toast('YouTube video found!', 'yt'); showDetail(recId); }
-    else { toast('No YouTube video found for this album', 'error'); }
+    else { toast('No YouTube video found — try pasting a URL manually', 'error'); }
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -3953,6 +4004,9 @@ function openLyricsModal(title, artist) {
   const a = id('lyrics-modal-artist');
   if (t) t.textContent = title  || '—';
   if (a) a.textContent = artist || '';
+  // Always reset content to loading spinner so the modal is never blank
+  const c = id('lyrics-modal-content');
+  if (c) c.innerHTML = `<div class="dj-lyrics-status"><div class="dj-lyrics-dot"></div>A procurar letras…</div>`;
   modal.classList.remove('hidden');
   document.body.style.overflow = 'hidden';
 }
@@ -4152,7 +4206,9 @@ function renderDJLyricsPanel() {
   if (!content) return;
 
   if (!_djLyrics) {
-    content.innerHTML = `<div class="dj-lyrics-status" style="opacity:0.5;">Letras não encontradas para esta faixa.</div>`;
+    const track = djCurrentSet?.tracks?.[djCurrentIdx];
+    const retry = track ? `<button class="btn btn-ghost btn-sm" style="margin-top:0.75rem;font-size:0.8rem;" onclick="fetchDJLyrics(djCurrentSet.tracks[djCurrentIdx])">↺ Tentar novamente</button>` : '';
+    content.innerHTML = `<div class="dj-lyrics-status" style="opacity:0.5;flex-direction:column;gap:0.5rem;">Letras não encontradas para esta faixa.${retry}</div>`;
     return;
   }
   if (_djLyrics.instrumental) {
@@ -4236,8 +4292,16 @@ function toggleCatLyrics() {
   if (_catShowLyrics) {
     openLyricsModal(_catCurrentTrack?.title || '—', _catCurrentTrack?.artist || '');
     if (btn) btn.style.opacity = '1';
-    if (_catCurrentTrack && !_catLyrics) fetchCatLyrics(_catCurrentTrack.artist, _catCurrentTrack.title);
-    if (_catLastTime > 0 && _catLyrics?.lines?.length) updateCatLyricsLine(_catLastTime);
+    if (_catLyrics) {
+      // Lyrics already loaded — just re-render (avoids blank modal on re-open)
+      renderCatLyricsPanel();
+      if (_catLastTime > 0 && _catLyrics.lines?.length) updateCatLyricsLine(_catLastTime);
+    } else if (_catCurrentTrack) {
+      fetchCatLyrics(_catCurrentTrack.artist, _catCurrentTrack.title);
+    } else {
+      const c = id('lyrics-modal-content');
+      if (c) c.innerHTML = `<div class="dj-lyrics-status" style="opacity:0.5;">Nenhuma faixa em curso.</div>`;
+    }
   } else {
     closeLyricsModal();
   }
@@ -4274,7 +4338,10 @@ function renderCatLyricsPanel() {
   const content = lyricsContentEl();
   if (!content) return;
   if (!_catLyrics) {
-    content.innerHTML = `<div class="dj-lyrics-status" style="opacity:0.5;">Letras não encontradas.</div>`; return;
+    const retry = _catCurrentTrack
+      ? `<button class="btn btn-ghost btn-sm" style="margin-top:0.75rem;font-size:0.8rem;" onclick="fetchCatLyrics(_catCurrentTrack.artist,_catCurrentTrack.title)">↺ Tentar novamente</button>`
+      : '';
+    content.innerHTML = `<div class="dj-lyrics-status" style="opacity:0.5;flex-direction:column;gap:0.5rem;">Letras não encontradas.${retry}</div>`; return;
   }
   if (_catLyrics.instrumental) {
     content.innerHTML = `<div class="dj-lyrics-status" style="opacity:0.5;">🎹 Instrumental</div>`; return;
@@ -4437,10 +4504,19 @@ function toggleDJLyrics() {
     const artist = djCurrentSet?.artist || '';
     openLyricsModal(track?.title || '—', artist);
     if (btn) btn.classList.add('active');
-    if (!_djLyrics && djCurrentSet) fetchDJLyrics(djCurrentSet.tracks[djCurrentIdx]);
-    if (_djLastTime > 0) {
-      if (_djLyrics?.lines?.length) updateDJLyricsLine(_djLastTime);
-      else if (_djLyrics?.plain)    updateDJLyricsPlain(_djLastTime);
+    if (_djLyrics) {
+      // Lyrics already loaded — just re-render (avoids blank modal on re-open)
+      renderDJLyricsPanel();
+      if (_djLastTime > 0) {
+        if (_djLyrics.lines?.length) updateDJLyricsLine(_djLastTime);
+        else if (_djLyrics.plain)    updateDJLyricsPlain(_djLastTime);
+      }
+    } else if (djCurrentSet) {
+      fetchDJLyrics(djCurrentSet.tracks[djCurrentIdx]);
+    } else {
+      // No set loaded — show proper message instead of blank
+      const c = id('lyrics-modal-content');
+      if (c) c.innerHTML = `<div class="dj-lyrics-status" style="opacity:0.5;">Nenhuma faixa em curso.</div>`;
     }
   } else {
     closeLyricsModal();
