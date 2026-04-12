@@ -3784,6 +3784,11 @@ function ensureDJPostMessageListener() {
             if (_djLyrics?.lines?.length) updateDJLyricsLine(_djLastTime);
             else if (_djLyrics?.plain)    updateDJLyricsPlain(_djLastTime);
           }
+          // Re-time plain lyrics once real duration is known (mirrors Catalogue fix)
+          if (dur > 10 && _djLyrics && !_djLyrics.synced && !_djLyrics.lines?.length && _djLyrics.plain) {
+            const timed = _plainToTimed(_djLyrics.plain, dur);
+            if (timed) { _djLyrics = { lines: timed, synced: false }; renderDJLyricsPanel(); }
+          }
           if (_djTrackDuration > 5 && _djLastTime >= _djTrackDuration - 1.5 && !_djEndFired) {
             _djEndFired = true;
             setTimeout(_djTriggerEnd, 800);
@@ -4115,35 +4120,27 @@ async function fetchDJLyrics(track) {
   content.innerHTML = `<div class="dj-lyrics-status"><div class="dj-lyrics-dot"></div>A procurar letras…</div>`;
 
   const { artist, title } = _djExtractArtistTitle(track);
+  // Wait briefly if duration not yet known (YouTube player may not have reported it yet)
+  if (!_djTrackDuration) await new Promise(r => setTimeout(r, 800));
   const dur = Math.round(_djTrackDuration) || 0;
 
-  // 1. lrclib — letras sincronizadas (LRC), 4 estratégias, melhor qualidade
-  const lrc = await _lrclib(artist, title, dur);
+  // Tier 1 — synced lyrics (lrclib + textyl in parallel)
+  const [lrc, txt] = await Promise.all([_lrclib(artist, title, dur), _textyl(artist, title)]);
   if (lrc) {
     _djLyrics = { ...lrc, synced: !!(lrc.lines?.length) };
     renderDJLyricsPanel(); return;
   }
-
-  // 2. textyl.co — letras sincronizadas, base de dados diferente
-  const txt = await _textyl(artist, title);
   if (txt) {
     _djLyrics = { ...txt, synced: true };
     renderDJLyricsPanel(); return;
   }
 
-  // 3. some-random-api — texto simples → converte para timing estimado
-  const sra = await _someRandomApiLyrics(artist, title);
-  if (sra?.plain) {
-    const timed = dur > 10 ? _plainToTimed(sra.plain, dur) : null;
-    _djLyrics = timed ? { lines: timed, synced: false } : { ...sra, synced: false };
-    renderDJLyricsPanel(); return;
-  }
-
-  // 4. lyrics.ovh — texto simples, último recurso
-  const ovh = await _lyricsOvh(artist, title);
-  if (ovh?.plain) {
-    const timed = dur > 10 ? _plainToTimed(ovh.plain, dur) : null;
-    _djLyrics = timed ? { lines: timed, synced: false } : { ...ovh, synced: false };
+  // Tier 2 — plain text lyrics (some-random-api + lyrics.ovh in parallel)
+  const [sra, ovh] = await Promise.all([_someRandomApiLyrics(artist, title), _lyricsOvh(artist, title)]);
+  const plain = sra?.plain || ovh?.plain;
+  if (plain) {
+    const timed = dur > 10 ? _plainToTimed(plain, dur) : null;
+    _djLyrics = timed ? { lines: timed, synced: false } : { plain, synced: false };
     renderDJLyricsPanel(); return;
   }
 
@@ -4252,25 +4249,21 @@ async function fetchCatLyrics(artist, title) {
   if (!content) return;
   content.innerHTML = `<div class="dj-lyrics-status"><div class="dj-lyrics-dot"></div>A procurar letras…</div>`;
 
+  // Wait briefly if duration not yet known
+  if (!_catTrackDuration) await new Promise(r => setTimeout(r, 800));
   const dur = Math.round(_catTrackDuration) || 0;
 
-  const lrc = await _lrclib(artist, title, dur);
+  // Tier 1 — synced lyrics (lrclib + textyl in parallel)
+  const [lrc, txt] = await Promise.all([_lrclib(artist, title, dur), _textyl(artist, title)]);
   if (lrc) { _catLyrics = { ...lrc, synced: !!(lrc.lines?.length) }; renderCatLyricsPanel(); return; }
-
-  const txt = await _textyl(artist, title);
   if (txt) { _catLyrics = { ...txt, synced: true }; renderCatLyricsPanel(); return; }
 
-  const sra = await _someRandomApiLyrics(artist, title);
-  if (sra?.plain) {
-    const timed = dur > 10 ? _plainToTimed(sra.plain, dur) : null;
-    _catLyrics = timed ? { lines: timed, synced: false } : { ...sra, synced: false };
-    renderCatLyricsPanel(); return;
-  }
-
-  const ovh = await _lyricsOvh(artist, title);
-  if (ovh?.plain) {
-    const timed = dur > 10 ? _plainToTimed(ovh.plain, dur) : null;
-    _catLyrics = timed ? { lines: timed, synced: false } : { ...ovh, synced: false };
+  // Tier 2 — plain text lyrics (some-random-api + lyrics.ovh in parallel)
+  const [sra, ovh] = await Promise.all([_someRandomApiLyrics(artist, title), _lyricsOvh(artist, title)]);
+  const plain = sra?.plain || ovh?.plain;
+  if (plain) {
+    const timed = dur > 10 ? _plainToTimed(plain, dur) : null;
+    _catLyrics = timed ? { lines: timed, synced: false } : { plain, synced: false };
     renderCatLyricsPanel(); return;
   }
 
