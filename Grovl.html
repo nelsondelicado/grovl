@@ -1093,11 +1093,24 @@ label { display: block; color: var(--text-dim); font-size: 0.8rem; margin-bottom
         <h3>💾 Backup &amp; Restore</h3>
         <p class="desc">Export your collection as JSON, or import a previously saved file.</p>
         <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-          <button class="btn btn-secondary" onclick="exportJSON()">📤 Export JSON</button>
-          <button class="btn btn-secondary" onclick="document.getElementById('imp-file').click()">📥 Import JSON</button>
+          <button class="btn btn-secondary" onclick="exportJSON()">📤 Export Collection</button>
+          <button class="btn btn-secondary" onclick="document.getElementById('imp-file').click()">📥 Import Collection</button>
+          <button class="btn btn-secondary" onclick="exportEverything()">💾 Export Everything</button>
           <button class="btn btn-danger" onclick="clearAll()">🗑️ Clear All Data</button>
         </div>
         <input type="file" id="imp-file" accept=".json" style="display:none" onchange="importJSON(event)">
+      </div>
+
+      <!-- CREDENTIALS BACKUP -->
+      <div class="settings-card">
+        <h3>🔑 Credentials Backup</h3>
+        <p class="desc">Export your API keys and tokens to a local file so you never need to re-enter them. Import to restore on a new browser or device.</p>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+          <button class="btn btn-secondary" onclick="exportCredentials()">🔑 Export Credentials</button>
+          <button class="btn btn-secondary" onclick="document.getElementById('imp-creds-file').click()">📂 Import Credentials</button>
+        </div>
+        <input type="file" id="imp-creds-file" accept=".json" style="display:none" onchange="importCredentials(event)">
+        <div class="status-msg" id="creds-status"></div>
       </div>
 
     </div>
@@ -2787,8 +2800,49 @@ async function importDiscogs() {
 function exportJSON() {
   const blob = new Blob([JSON.stringify({collection:state.collection},null,2)],{type:'application/json'});
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href=url; a.download=`grovl-${today()}.json`; a.click();
-  URL.revokeObjectURL(url); toast('Exported!','success');
+  const a = document.createElement('a'); a.href=url; a.download=`grovl-collection-${today()}.json`; a.click();
+  URL.revokeObjectURL(url); toast('Collection exported!','success');
+}
+function exportEverything() {
+  const blob = new Blob([JSON.stringify(state,null,2)],{type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download=`grovl-full-backup-${today()}.json`; a.click();
+  URL.revokeObjectURL(url); toast('Full backup exported!','success');
+}
+function exportCredentials() {
+  const creds = {
+    _grovlCredentials: true,
+    token:           state.settings.token           || '',
+    username:        state.settings.username         || '',
+    ytApiKey:        state.settings.ytApiKey         || '',
+    ytClientId:      state.settings.ytClientId       || '',
+    ytClientSecret:  state.settings.ytClientSecret   || ''
+  };
+  const blob = new Blob([JSON.stringify(creds,null,2)],{type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download=`grovl-credentials.json`; a.click();
+  URL.revokeObjectURL(url); toast('Credentials exported — keep this file safe!','success');
+}
+function importCredentials(e) {
+  const file = e.target.files[0]; if (!file) return;
+  const st = id('creds-status');
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const d = JSON.parse(ev.target.result);
+      if (!d._grovlCredentials) { toast('Not a Grovl credentials file','error'); return; }
+      if (d.token)          state.settings.token          = d.token;
+      if (d.username)       state.settings.username       = d.username;
+      if (d.ytApiKey)       state.settings.ytApiKey       = d.ytApiKey;
+      if (d.ytClientId)     state.settings.ytClientId     = d.ytClientId;
+      if (d.ytClientSecret) state.settings.ytClientSecret = d.ytClientSecret;
+      save(); loadSettingsForm();
+      st.innerHTML = '<span style="color:var(--success)">✓ Credentials restored!</span>';
+      toast('Credentials imported successfully','success');
+    } catch(_) { toast('Error reading credentials file','error'); }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
 }
 function importJSON(e) {
   const file = e.target.files[0]; if (!file) return;
