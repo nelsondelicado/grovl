@@ -1679,17 +1679,21 @@ async function ytSearchAlbum(artist, album) {
   return best || items[0]?.id?.videoId || null;
 }
 
-// Smarter YouTube search for DJ set individual tracks.
-// Fetches 6 results, scores each by relevance, skips full-album videos.
-async function ytSearchDJTrack(artist, trackTitle) {
+// Smarter YouTube search for individual tracks.
+// album param (optional) anchors the search to the right recording.
+// Fetches 8 results, scores each by relevance, skips full-album uploads.
+async function ytSearchDJTrack(artist, trackTitle, album) {
   const key = state.settings.ytApiKey;
   if (!key) throw new Error('YouTube API Key not set. Add it in Settings.');
 
-  // Full-album video patterns to skip
+  // Patterns that indicate a full-album or compilation upload — skip these
   const albumRx = /\b(full\s+album|complete\s+album|full\s+lp|vinyl\s+rip|side\s+[ab12]|discography|greatest\s+hits|best\s+of\b.*\bfull|compilation)\b/i;
 
-  const query = `${artist} - ${trackTitle}`;
-  const url = `${YTAPI}/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=6&key=${encodeURIComponent(key)}`;
+  // Include album in query when available — anchors to the right recording
+  const query = album
+    ? `${artist} ${trackTitle} ${album}`
+    : `${artist} - ${trackTitle}`;
+  const url = `${YTAPI}/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=8&key=${encodeURIComponent(key)}`;
   const r = await fetch(url);
   const d = await r.json();
   if (d.error) throw new Error('YouTube: ' + d.error.message);
@@ -1697,23 +1701,26 @@ async function ytSearchDJTrack(artist, trackTitle) {
   const items = d.items || [];
   const titleNorm  = trackTitle.toLowerCase().trim();
   const artistNorm = artist.toLowerCase().trim();
+  const albumNorm  = (album || '').toLowerCase().trim();
 
   let best = null, bestScore = -1;
   for (const item of items) {
     const vid      = item.id?.videoId;
     if (!vid) continue;
     const vidTitle = (item.snippet?.title || '').toLowerCase();
+    const channel  = (item.snippet?.channelTitle || '').toLowerCase();
     if (albumRx.test(vidTitle)) continue;          // skip full-album uploads
 
     let score = 0;
-    if (vidTitle.includes(titleNorm))  score += 4; // title match — most important
-    if (vidTitle.includes(artistNorm)) score += 2; // artist match
+    if (vidTitle.includes(titleNorm))  score += 5; // track title match — most important
+    if (vidTitle.includes(artistNorm) || channel.includes(artistNorm)) score += 3; // artist match
+    if (albumNorm && vidTitle.includes(albumNorm)) score += 2; // album match — right recording
     if (/\b(official\s*(video|audio|music\s*video|clip)|topic)\b/i.test(vidTitle)) score += 1;
 
     if (score > bestScore) { bestScore = score; best = vid; }
   }
 
-  // Fall back to first non-album result, or just first result
+  // Fall back to first non-album result, or first result overall
   if (!best) {
     const fallback = items.find(i => i.id?.videoId && !albumRx.test(i.snippet?.title || ''));
     best = fallback?.id?.videoId || items[0]?.id?.videoId || null;
@@ -2186,13 +2193,14 @@ function showDetail(recId) {
         ${r.tracklist.map((t, ti) => {
           const safeArtist = (r.artist||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
           const safeTitle  = (t.title ||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+          const safeAlbum  = (r.title  ||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
           const ytBtn = t.ytVideoId
             ? `<button class="tr-yt found tr-play-btn" id="tr-btn-${ti}" data-vid="${esc(t.ytVideoId)}"
                  onclick="playDetailTrack('${esc(t.ytVideoId)}','${safeArtist}','${safeTitle}')"
                  title="Reproduzir com letras">▶ Play</button>`
             : state.settings.ytApiKey
               ? `<button class="tr-yt search" id="tr-btn-${ti}"
-                   onclick="findAndPlayTrack('${esc(r.id)}',${ti},'${safeArtist}','${safeTitle}')"
+                   onclick="findAndPlayTrack('${esc(r.id)}',${ti},'${safeArtist}','${safeTitle}','${safeAlbum}')"
                    title="Encontrar vídeo e reproduzir">🔍 Find</button>`
               : `<a class="tr-yt search" href="${esc(ytSearchUrl(r.artist, t.title))}" target="_blank">🔍 YT</a>`;
           return `<li>
@@ -2342,13 +2350,13 @@ async function fetchSingleTracklist(recId) {
 }
 
 // Find a single track's YouTube video, save it, then play immediately
-async function findAndPlayTrack(recId, trackIdx, artist, title) {
+async function findAndPlayTrack(recId, trackIdx, artist, title, album) {
   const rec = state.collection.find(r => r.id === recId);
   if (!rec?.tracklist) return;
   const btn = id(`tr-btn-${trackIdx}`);
   if (btn) { btn.innerHTML = '<span class="spinner" style="width:11px;height:11px;border-width:2px;display:inline-block;vertical-align:middle;"></span>'; btn.disabled = true; }
   try {
-    const vid = await ytSearchDJTrack(artist, title);
+    const vid = await ytSearchDJTrack(artist, title, album || rec.title);
     if (vid) {
       rec.tracklist[trackIdx].ytVideoId = vid;
       save();
@@ -2385,7 +2393,7 @@ async function findAllTracks(recId) {
     const trBtn = id(`tr-btn-${i}`);
     if (trBtn) { trBtn.innerHTML = '<span class="spinner" style="width:11px;height:11px;border-width:2px;display:inline-block;vertical-align:middle;"></span>'; trBtn.disabled = true; }
     try {
-      const vid = await ytSearchDJTrack(rec.artist, t.title);
+      const vid = await ytSearchDJTrack(rec.artist, t.title, rec.title);
       if (vid) {
         t.ytVideoId = vid; save(); found++;
         if (trBtn) {
