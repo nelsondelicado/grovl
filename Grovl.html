@@ -1017,6 +1017,25 @@ label { display: block; color: var(--text-dim); font-size: 0.8rem; margin-bottom
         <div class="status-msg" id="yt-settings-status"></div>
       </div>
 
+      <!-- GENIUS LYRICS -->
+      <div class="settings-card">
+        <h3>🎤 Genius Lyrics API</h3>
+        <p class="desc">
+          Genius vastly improves lyrics coverage. Get your <strong>Client Access Token</strong> at
+          <a href="https://genius.com/api-clients" target="_blank" style="color:var(--accent)">genius.com/api-clients</a>
+          (free account, no billing required).
+        </p>
+        <div class="form-group">
+          <label>Genius Client Access Token</label>
+          <input type="password" id="inp-genius" placeholder="Paste your Client Access Token…">
+        </div>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;">
+          <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+          <button class="btn btn-secondary" onclick="testGeniusToken()">Test Token</button>
+        </div>
+        <div class="status-msg" id="genius-settings-status"></div>
+      </div>
+
       <!-- TRACKLIST FETCH -->
       <div class="settings-card">
         <h3>📜 Fetch Full Tracklists</h3>
@@ -1392,7 +1411,7 @@ let ytAccessToken = null;   // YouTube OAuth2 access token (PKCE flow)
 
 // ── STATE ────────────────────────────────────────────────────────
 const state = {
-  settings: { token: '', username: '', ytApiKey: '', ytClientId: '', ytClientSecret: '' },
+  settings: { token: '', username: '', ytApiKey: '', ytClientId: '', ytClientSecret: '', geniusToken: '' },
   collection: [],
   wantlist: [],
   wantlistFetchedAt: null,  // ISO timestamp of last full wantlist fetch from Discogs
@@ -1726,6 +1745,17 @@ async function ytSearchDJTrack(artist, trackTitle, album) {
     best = fallback?.id?.videoId || items[0]?.id?.videoId || null;
   }
   return best;
+}
+
+async function testGeniusToken() {
+  const status = id('genius-settings-status');
+  status.innerHTML = '<span class="spinner"></span> Testing…';
+  const result = await _genius('Billie Eilish', 'Ocean Eyes');
+  if (result?.plain) {
+    status.innerHTML = '<span style="color:var(--success)">✓ Genius token works — lyrics found!</span>';
+  } else {
+    status.innerHTML = '<span style="color:var(--red)">✗ Token invalid or no result. Check the token and try again.</span>';
+  }
 }
 
 async function testYTKey() {
@@ -2837,6 +2867,7 @@ function loadSettingsForm() {
   id('inp-ytkey').value    = state.settings.ytApiKey  || '';
   id('inp-ytclient').value = state.settings.ytClientId || '';
   id('inp-ytsecret').value = state.settings.ytClientSecret || '';
+  id('inp-genius').value   = state.settings.geniusToken || '';
   if (ytAccessToken) {
     id('yt-auth-status').innerHTML = '<span class="yt-connected">✓ YouTube connected</span>';
     id('btn-yt-signin').disabled = true;
@@ -2848,6 +2879,7 @@ function saveSettings() {
   state.settings.ytApiKey   = id('inp-ytkey').value.trim();
   state.settings.ytClientId     = id('inp-ytclient').value.trim();
   state.settings.ytClientSecret = id('inp-ytsecret').value.trim();
+  state.settings.geniusToken    = id('inp-genius').value.trim();
   save();
   id('settings-status').innerHTML = '<span style="color:var(--success)">✓ Saved!</span>';
   toast('Settings saved', 'success');
@@ -2955,7 +2987,8 @@ function exportCredentials() {
     username:        state.settings.username         || '',
     ytApiKey:        state.settings.ytApiKey         || '',
     ytClientId:      state.settings.ytClientId       || '',
-    ytClientSecret:  state.settings.ytClientSecret   || ''
+    ytClientSecret:  state.settings.ytClientSecret   || '',
+    geniusToken:     state.settings.geniusToken      || ''
   };
   const blob = new Blob([JSON.stringify(creds,null,2)],{type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -2975,6 +3008,7 @@ function importCredentials(e) {
       if (d.ytApiKey)       state.settings.ytApiKey       = d.ytApiKey;
       if (d.ytClientId)     state.settings.ytClientId     = d.ytClientId;
       if (d.ytClientSecret) state.settings.ytClientSecret = d.ytClientSecret;
+      if (d.geniusToken)    state.settings.geniusToken    = d.geniusToken;
       save(); loadSettingsForm();
       st.innerHTML = '<span style="color:var(--success)">✓ Credentials restored!</span>';
       toast('Credentials imported successfully','success');
@@ -4173,6 +4207,58 @@ async function _lrclib(artist, title, dur) {
   return null;
 }
 
+// ── Lyrics: Genius API — search + scrape page for plain lyrics ───────────────
+async function _genius(artist, title) {
+  const token = state.settings.geniusToken;
+  if (!token) return null;
+  try {
+    const q   = `${artist} ${title}`;
+    const to  = (ms) => new Promise((_, r) => setTimeout(() => r(new Error('to')), ms));
+    // 1. Search the Genius API for the song
+    const sr  = await Promise.race([
+      fetch(_proxied(`https://api.genius.com/search?q=${encodeURIComponent(q)}`), {
+        headers: { 'Authorization': `Bearer ${token}` }
+      }), to(5000)
+    ]);
+    if (!sr.ok) return null;
+    const sd   = await sr.json();
+    const hits = sd?.response?.hits || [];
+    if (!hits.length) return null;
+    // Pick best hit: prefer title+artist match
+    const titleN  = title.toLowerCase();
+    const artistN = artist.toLowerCase();
+    let best = hits[0];
+    for (const h of hits) {
+      const ht = (h.result?.title || '').toLowerCase();
+      const ha = (h.result?.primary_artist?.name || '').toLowerCase();
+      if (ht.includes(titleN) && ha.includes(artistN)) { best = h; break; }
+    }
+    const pageUrl = best?.result?.url;
+    if (!pageUrl) return null;
+    // 2. Fetch the Genius lyrics page and scrape
+    const pr = await Promise.race([
+      fetch(_proxied(pageUrl)), to(6000)
+    ]);
+    if (!pr.ok) return null;
+    const html = await pr.text();
+    // Lyrics are in <div data-lyrics-container="true">…</div>
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    const containers = tmp.querySelectorAll('[data-lyrics-container="true"]');
+    if (!containers.length) return null;
+    const lines = [];
+    containers.forEach(el => {
+      // Replace <br> with newlines, strip other tags
+      el.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
+      el.querySelectorAll('[data-exclude-from-selection]').forEach(e => e.remove());
+      const text = el.textContent;
+      text.split('\n').forEach(l => { if (l.trim()) lines.push(l.trim()); });
+    });
+    if (!lines.length) return null;
+    return { plain: lines.join('\n') };
+  } catch(_) { return null; }
+}
+
 // ── Lyrics: some-random-api (plain, CORS-friendly, no key) ──────────────────
 async function _someRandomApiLyrics(artist, title) {
   try {
@@ -4277,9 +4363,9 @@ async function fetchDJLyrics(track) {
     renderDJLyricsPanel(); return;
   }
 
-  // Tier 2 — plain text lyrics (some-random-api + lyrics.ovh in parallel)
-  const [sra, ovh] = await Promise.all([_someRandomApiLyrics(artist, title), _lyricsOvh(artist, title)]);
-  const plain = sra?.plain || ovh?.plain;
+  // Tier 2 — plain text lyrics (Genius + some-random-api + lyrics.ovh in parallel)
+  const [genius, sra, ovh] = await Promise.all([_genius(artist, title), _someRandomApiLyrics(artist, title), _lyricsOvh(artist, title)]);
+  const plain = genius?.plain || sra?.plain || ovh?.plain;
   if (plain) {
     const timed = dur > 10 ? _plainToTimed(plain, dur) : null;
     _djLyrics = timed ? { lines: timed, synced: false } : { plain, synced: false };
@@ -4410,9 +4496,9 @@ async function fetchCatLyrics(artist, title) {
   if (lrc) { _catLyrics = { ...lrc, synced: !!(lrc.lines?.length) }; renderCatLyricsPanel(); return; }
   if (txt) { _catLyrics = { ...txt, synced: true }; renderCatLyricsPanel(); return; }
 
-  // Tier 2 — plain text lyrics (some-random-api + lyrics.ovh in parallel)
-  const [sra, ovh] = await Promise.all([_someRandomApiLyrics(artist, title), _lyricsOvh(artist, title)]);
-  const plain = sra?.plain || ovh?.plain;
+  // Tier 2 — plain text lyrics (Genius + some-random-api + lyrics.ovh in parallel)
+  const [genius, sra, ovh] = await Promise.all([_genius(artist, title), _someRandomApiLyrics(artist, title), _lyricsOvh(artist, title)]);
+  const plain = genius?.plain || sra?.plain || ovh?.plain;
   if (plain) {
     const timed = dur > 10 ? _plainToTimed(plain, dur) : null;
     _catLyrics = timed ? { lines: timed, synced: false } : { plain, synced: false };
