@@ -2173,16 +2173,28 @@ function showDetail(recId) {
   const allGenres = [...(r.genre||[]), ...(r.style||[])];
   const sf = '★'.repeat(r.rating||0) + '☆'.repeat(5-(r.rating||0));
 
+  const missingTracks = (r.tracklist||[]).filter(t => !t.ytVideoId).length;
   const trackHtml = r.tracklist?.length
-    ? `<ul class="tracklist">
-        ${r.tracklist.map(t => {
+    ? `${state.settings.ytApiKey && missingTracks > 0
+        ? `<div style="margin-bottom:0.6rem;">
+             <button class="btn btn-secondary btn-sm" id="btn-find-all-tracks" onclick="findAllTracks('${r.id}')">
+               🔍 Find ${missingTracks} track${missingTracks > 1 ? 's' : ''} on YouTube
+             </button>
+           </div>`
+        : ''}
+     <ul class="tracklist">
+        ${r.tracklist.map((t, ti) => {
           const safeArtist = (r.artist||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
           const safeTitle  = (t.title ||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
           const ytBtn = t.ytVideoId
-            ? `<button class="tr-yt found tr-play-btn" data-vid="${esc(t.ytVideoId)}"
+            ? `<button class="tr-yt found tr-play-btn" id="tr-btn-${ti}" data-vid="${esc(t.ytVideoId)}"
                  onclick="playDetailTrack('${esc(t.ytVideoId)}','${safeArtist}','${safeTitle}')"
                  title="Reproduzir com letras">▶ Play</button>`
-            : `<a class="tr-yt search" href="${esc(ytSearchUrl(r.artist, t.title))}" target="_blank">🔍 YT</a>`;
+            : state.settings.ytApiKey
+              ? `<button class="tr-yt search" id="tr-btn-${ti}"
+                   onclick="findAndPlayTrack('${esc(r.id)}',${ti},'${safeArtist}','${safeTitle}')"
+                   title="Encontrar vídeo e reproduzir">🔍 Find</button>`
+              : `<a class="tr-yt search" href="${esc(ytSearchUrl(r.artist, t.title))}" target="_blank">🔍 YT</a>`;
           return `<li>
             <span class="tr-pos">${esc(t.pos)}</span>
             <span class="tr-title">${esc(t.title)}</span>
@@ -2327,6 +2339,74 @@ async function fetchSingleTracklist(recId) {
     toast('Tracklist loaded!', 'success');
     showDetail(recId);
   } catch(e) { toast(e.message, 'error'); }
+}
+
+// Find a single track's YouTube video, save it, then play immediately
+async function findAndPlayTrack(recId, trackIdx, artist, title) {
+  const rec = state.collection.find(r => r.id === recId);
+  if (!rec?.tracklist) return;
+  const btn = id(`tr-btn-${trackIdx}`);
+  if (btn) { btn.innerHTML = '<span class="spinner" style="width:11px;height:11px;border-width:2px;display:inline-block;vertical-align:middle;"></span>'; btn.disabled = true; }
+  try {
+    const vid = await ytSearchDJTrack(artist, title);
+    if (vid) {
+      rec.tracklist[trackIdx].ytVideoId = vid;
+      save();
+      playDetailTrack(vid, artist, title);
+      // Update button in-place without full re-render
+      if (btn) {
+        btn.className = 'tr-yt found tr-play-btn';
+        btn.innerHTML = '▶ Play';
+        btn.disabled = false;
+        btn.title = 'Reproduzir com letras';
+        btn.setAttribute('data-vid', vid);
+        btn.onclick = () => playDetailTrack(vid, artist, title);
+      }
+    } else {
+      if (btn) { btn.innerHTML = '🔍 Find'; btn.disabled = false; }
+      toast(`Vídeo não encontrado para "${title}"`, 'error');
+    }
+  } catch(e) {
+    if (btn) { btn.innerHTML = '🔍 Find'; btn.disabled = false; }
+    toast(e.message, 'error');
+  }
+}
+
+// Find YouTube videos for all tracks in an album that don't have one yet
+async function findAllTracks(recId) {
+  const rec = state.collection.find(r => r.id === recId);
+  if (!rec?.tracklist) return;
+  const missing = rec.tracklist.map((t, i) => ({ t, i })).filter(x => !x.t.ytVideoId);
+  if (!missing.length) { toast('Todas as faixas já têm vídeo!', 'success'); return; }
+  const btn = id('btn-find-all-tracks');
+  if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spinner" style="width:11px;height:11px;border-width:2px;display:inline-block;vertical-align:middle;"></span> A procurar…`; }
+  let found = 0;
+  for (const { t, i } of missing) {
+    const trBtn = id(`tr-btn-${i}`);
+    if (trBtn) { trBtn.innerHTML = '<span class="spinner" style="width:11px;height:11px;border-width:2px;display:inline-block;vertical-align:middle;"></span>'; trBtn.disabled = true; }
+    try {
+      const vid = await ytSearchDJTrack(rec.artist, t.title);
+      if (vid) {
+        t.ytVideoId = vid; save(); found++;
+        if (trBtn) {
+          trBtn.className = 'tr-yt found tr-play-btn';
+          trBtn.innerHTML = '▶ Play'; trBtn.disabled = false;
+          const safeArtist = rec.artist.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+          const safeTitle  = t.title.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+          trBtn.setAttribute('data-vid', vid);
+          trBtn.onclick = () => playDetailTrack(vid, safeArtist, safeTitle);
+        }
+      } else {
+        if (trBtn) { trBtn.innerHTML = '🔍 Find'; trBtn.disabled = false; }
+      }
+    } catch(e) {
+      if (trBtn) { trBtn.innerHTML = '🔍 Find'; trBtn.disabled = false; }
+      if (e.message.includes('quota')) { toast('Quota YouTube esgotada. Tenta amanhã.', 'error'); break; }
+    }
+    await new Promise(r => setTimeout(r, 300)); // small delay between requests
+  }
+  if (btn) btn.remove(); // hide button if all found
+  toast(`${found} de ${missing.length} faixas encontradas no YouTube!`, found ? 'success' : 'error');
 }
 
 function linkManualYT(recId) {
