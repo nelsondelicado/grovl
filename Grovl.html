@@ -525,8 +525,13 @@ body.has-mini-player { padding-bottom: 54px; }
 .lyrics-mode-btn { font-size:0.72rem; padding:0.28rem 0.6rem; border-radius:20px; border:1px solid var(--border); background:none; cursor:pointer; color:var(--text-muted); transition:all 0.15s; font-family:inherit; line-height:1.2; }
 .lyrics-mode-btn.lm-active { background:var(--accent); color:white; border-color:var(--accent); }
 /* ── Video slot (video mode) ─────────────────────────────────────────── */
-.lyrics-modal-video-slot { width:100%; aspect-ratio:16/9; background:#000; flex-shrink:0; overflow:hidden; }
-.lyrics-modal-video-slot iframe { width:100% !important; height:100% !important; border:none; display:block; aspect-ratio:16/9; }
+.lyrics-modal-video-slot {
+  width: 100%; flex-shrink: 0; overflow: hidden; background: #000;
+  /* Cap height so enough room remains for lyrics */
+  max-height: min(38vh, 56.25vw); /* 56.25vw = 16:9 at full width */
+  aspect-ratio: 16/9;
+}
+.lyrics-modal-video-slot iframe { width:100% !important; height:100% !important; border:none; display:block; }
 .lyrics-modal-video-slot.hidden { display:none; }
 /* ── Immersive mode ──────────────────────────────────────────────────── */
 .mode-immersive { background:linear-gradient(160deg,#07070f 0%,#0e0e1c 100%) !important; }
@@ -601,6 +606,7 @@ body.has-mini-player { padding-bottom: 54px; }
 .lyrics-modal-body {
   flex: 1; overflow-y: auto; scroll-behavior: smooth;
   padding: 1.8rem 3rem 7rem;
+  position: relative; /* makes offsetTop of child lines relative to this scroll container */
 }
 .lyrics-modal-body::-webkit-scrollbar { width: 3px; }
 .lyrics-modal-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
@@ -4365,15 +4371,19 @@ function lyricsContentEl() { return id('lyrics-modal-content'); }
 function lyricsScrollEl()  { return id('lyrics-modal-body'); }
 
 // Scroll the active lyric line into view.
-// In video mode: anchor near the TOP of the scroll area (line stays just below the video).
-// In immersive mode: center the line vertically.
+// Now that .lyrics-modal-body has position:relative, cur.offsetTop is relative to the
+// scroll container itself — so the maths are straightforward.
+// In video mode: anchor near the TOP of the lyrics area (line visible right below the video).
+// In immersive mode: center the line vertically in the panel.
 function _scrollLyricsTo(curEl) {
   const panel = lyricsScrollEl();
   if (!curEl || !panel) return;
   if (_lyricsViewMode === 'video') {
-    panel.scrollTop = curEl.offsetTop - 24;
+    // Place active line 20px from the top of the visible lyrics area
+    panel.scrollTop = curEl.offsetTop - 20;
   } else {
-    panel.scrollTop = curEl.offsetTop - panel.clientHeight / 2 + curEl.clientHeight / 2;
+    // Centre the active line in the panel
+    panel.scrollTop = curEl.offsetTop - (panel.clientHeight / 2) + (curEl.clientHeight / 2);
   }
 }
 
