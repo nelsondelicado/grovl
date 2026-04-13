@@ -483,7 +483,8 @@ label { display: block; color: var(--text-dim); font-size: 0.8rem; margin-bottom
 .dj-lyrics-badge { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.70rem; font-weight: 600; letter-spacing: 0.03em; padding: 0.2rem 0.55rem; border-radius: 20px; margin-bottom: 0.75rem; }
 .dj-lyrics-badge--sync   { background: rgba(16,185,129,0.12); color: #10b981; border: 1px solid rgba(16,185,129,0.25); }
 .dj-lyrics-badge--est    { background: rgba(245,158,11,0.12); color: #f59e0b; border: 1px solid rgba(245,158,11,0.25); }
-.dj-lyrics-badge--custom { background: rgba(139,92,246,0.12); color: #8b5cf6; border: 1px solid rgba(139,92,246,0.25); }
+.dj-lyrics-badge--custom    { background: rgba(139,92,246,0.12); color: #8b5cf6; border: 1px solid rgba(139,92,246,0.25); }
+.dj-lyrics-badge--community { background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.25); }
 /* ── Tap Sync Mode ───────────────────────────────────────────────────── */
 .tap-sync-overlay { display:flex; flex-direction:column; height:100%; gap:0; }
 .tap-sync-lines { flex:1; overflow-y:auto; padding:1rem 1.5rem 0.5rem; }
@@ -1072,6 +1073,29 @@ body.has-mini-player { padding-bottom: 54px; }
         <div class="status-msg" id="genius-settings-status"></div>
       </div>
 
+      <!-- FIREBASE / COMMUNITY LYRICS -->
+      <div class="settings-card">
+        <h3>☁️ Letras Partilhadas (Firebase)</h3>
+        <p class="desc">
+          Quando sincronizas uma música com Tap-sync, a sincronização fica disponível para todos os utilizadores do Grovl automaticamente.
+          Requer um projecto Firebase gratuito com Firestore. Segue as instruções em
+          <a href="https://github.com/nelsondelicado/grovl#firebase" target="_blank" style="color:var(--accent);">github.com/nelsondelicado/grovl#firebase</a>.
+        </p>
+        <div class="form-group">
+          <label>Firebase API Key</label>
+          <input type="password" id="inp-fb-apikey" placeholder="AIzaSy…">
+        </div>
+        <div class="form-group">
+          <label>Firebase Project ID</label>
+          <input type="text" id="inp-fb-project" placeholder="grovl-lyrics-abc123">
+        </div>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;">
+          <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+          <button class="btn btn-secondary" onclick="testFirebaseConnection()">🔌 Testar ligação</button>
+        </div>
+        <div class="status-msg" id="firebase-settings-status"></div>
+      </div>
+
       <!-- TRACKLIST FETCH -->
       <div class="settings-card">
         <h3>📜 Fetch Full Tracklists</h3>
@@ -1447,8 +1471,10 @@ let ytAccessToken = null;   // YouTube OAuth2 access token (PKCE flow)
 
 // ── STATE ────────────────────────────────────────────────────────
 const state = {
-  settings: { token: '', username: '', ytApiKey: '', ytClientId: '', ytClientSecret: '', geniusToken: '' },
-  customLyrics: {},   // key: "artist|||title" → { lines:[{time,text}], savedAt }
+  settings: { token: '', username: '', ytApiKey: '', ytClientId: '', ytClientSecret: '', geniusToken: '',
+              firebaseApiKey: '', firebaseProjectId: '' },
+  customLyrics: {},          // key: "artist|||title" → { lines, savedAt } — local tap-sync
+  communityLyricsCache: {},  // key: "artist|||title" → { lines, savedAt, fetchedAt } — community cache (TTL 7d)
   collection: [],
   wantlist: [],
   wantlistFetchedAt: null,  // ISO timestamp of last full wantlist fetch from Discogs
@@ -1471,13 +1497,15 @@ function load() {
     const raw = localStorage.getItem('vv3') || localStorage.getItem('vv2');
     if (!raw) return;
     const p = JSON.parse(raw);
-    if (p.settings)          state.settings          = { ...state.settings, ...p.settings };
-    if (p.collection)        state.collection        = p.collection;
-    if (p.wantlist)          state.wantlist          = p.wantlist;
-    if (p.wantlistFetchedAt) state.wantlistFetchedAt = p.wantlistFetchedAt;
-    if (p.collectionValue)   state.collectionValue   = p.collectionValue;
-    if (p.discogsValue)      state.discogsValue      = p.discogsValue;
-    if (p.djSets)            state.djSets            = p.djSets;
+    if (p.settings)              state.settings              = { ...state.settings, ...p.settings };
+    if (p.collection)            state.collection            = p.collection;
+    if (p.wantlist)              state.wantlist              = p.wantlist;
+    if (p.wantlistFetchedAt)     state.wantlistFetchedAt     = p.wantlistFetchedAt;
+    if (p.collectionValue)       state.collectionValue       = p.collectionValue;
+    if (p.discogsValue)          state.discogsValue          = p.discogsValue;
+    if (p.djSets)                state.djSets                = p.djSets;
+    if (p.customLyrics)          state.customLyrics          = p.customLyrics;
+    if (p.communityLyricsCache)  state.communityLyricsCache  = p.communityLyricsCache;
   } catch(e) { console.warn('Grovl: failed to load state', e); }
 }
 
@@ -1822,6 +1850,115 @@ async function testGeniusToken() {
     status.innerHTML = '<span style="color:var(--success)">✓ Genius token works — lyrics found!</span>';
   } else {
     status.innerHTML = '<span style="color:var(--red)">✗ Token invalid or no result. Check the token and try again.</span>';
+  }
+}
+
+// ── Community Lyrics — Firebase Firestore REST API ────────────────────────────
+// No SDK required. Pure fetch() to the Firestore REST endpoint.
+// Collection: grovl-lyrics/{key}  where key = encodeURIComponent("artist|||title")
+// Firestore rules must allow:  match /grovl-lyrics/{doc} { allow read, write: if true; }
+// ─────────────────────────────────────────────────────────────────────────────
+
+function _fsUrl(key) {
+  const proj = state.settings.firebaseProjectId?.trim();
+  const akey = state.settings.firebaseApiKey?.trim();
+  if (!proj || !akey) return null;
+  const docId = encodeURIComponent(key);
+  return `https://firestore.googleapis.com/v1/projects/${proj}/databases/(default)/documents/grovl-lyrics/${docId}?key=${akey}`;
+}
+
+// Converts our lines array to Firestore document fields
+function _fsEncode(artist, title, lines) {
+  return {
+    fields: {
+      artist:  { stringValue: artist  || '' },
+      title:   { stringValue: title   || '' },
+      payload: { stringValue: JSON.stringify(lines) },
+      savedAt: { stringValue: new Date().toISOString().slice(0, 10) }
+    }
+  };
+}
+
+// Decodes a Firestore document into our format
+function _fsDecode(doc) {
+  if (!doc?.fields?.payload?.stringValue) return null;
+  try {
+    const lines  = JSON.parse(doc.fields.payload.stringValue);
+    const savedAt = doc.fields.savedAt?.stringValue || '';
+    if (!Array.isArray(lines) || !lines.length) return null;
+    return { lines, savedAt, source: 'community', synced: true };
+  } catch { return null; }
+}
+
+// Upload lyrics to Firestore (fire-and-forget — never blocks UI)
+async function _uploadCommunityLyrics(artist, title, lines) {
+  const url = _fsUrl(_lyricsKey(artist, title));
+  if (!url) return;
+  try {
+    await fetch(url, {
+      method:  'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(_fsEncode(artist, title, lines))
+    });
+  } catch(e) { console.warn('[Grovl] Community lyrics upload failed:', e.message); }
+}
+
+// Fetch community lyrics — checks local cache first (TTL 7 days)
+async function _fetchCommunityLyrics(artist, title) {
+  const url = _fsUrl(_lyricsKey(artist, title));
+  if (!url) return null;
+
+  // ── Cache check ────────────────────────────────────────────────────
+  if (!state.communityLyricsCache) state.communityLyricsCache = {};
+  const cached = state.communityLyricsCache[_lyricsKey(artist, title)];
+  if (cached?.fetchedAt) {
+    const ageMs = Date.now() - new Date(cached.fetchedAt).getTime();
+    if (ageMs < 7 * 24 * 60 * 60 * 1000) return cached; // < 7 days → use cache
+  }
+
+  // ── Network fetch ──────────────────────────────────────────────────
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(4000) });
+    if (r.status === 404) return null;       // document doesn't exist yet
+    if (!r.ok) return null;
+    const doc    = await r.json();
+    const result = _fsDecode(doc);
+    if (result) {
+      // Store in cache with timestamp
+      state.communityLyricsCache[_lyricsKey(artist, title)] = {
+        ...result, fetchedAt: new Date().toISOString()
+      };
+      save();
+    }
+    return result;
+  } catch { return null; }
+}
+
+// Test Firebase connection from Settings page
+async function testFirebaseConnection() {
+  const status = id('firebase-settings-status');
+  if (!status) return;
+  // Save current values before testing
+  state.settings.firebaseApiKey    = id('inp-fb-apikey').value.trim();
+  state.settings.firebaseProjectId = id('inp-fb-project').value.trim();
+  const url = _fsUrl('test|||connection');
+  if (!url) {
+    status.innerHTML = '<span style="color:var(--red)">✗ Preenche o API Key e o Project ID primeiro.</span>';
+    return;
+  }
+  status.innerHTML = '<span class="spinner"></span> A ligar…';
+  try {
+    // A 404 means "document not found" which still proves connectivity works
+    const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (r.status === 404 || r.ok) {
+      status.innerHTML = '<span style="color:var(--success)">✓ Firebase ligado! Letras sincronizadas serão partilhadas automaticamente.</span>';
+    } else {
+      const body = await r.json().catch(() => ({}));
+      const msg  = body?.error?.message || r.statusText;
+      status.innerHTML = `<span style="color:var(--red)">✗ Erro ${r.status}: ${msg}</span>`;
+    }
+  } catch(e) {
+    status.innerHTML = `<span style="color:var(--red)">✗ Sem resposta — verifica o Project ID e as regras do Firestore.</span>`;
   }
 }
 
@@ -2929,24 +3066,28 @@ async function calculateCollectionValue(forceRefresh = false) {
 
 // ── SETTINGS ─────────────────────────────────────────────────────
 function loadSettingsForm() {
-  id('inp-token').value    = state.settings.token    || '';
-  id('inp-user').value     = state.settings.username || '';
-  id('inp-ytkey').value    = state.settings.ytApiKey  || '';
-  id('inp-ytclient').value = state.settings.ytClientId || '';
-  id('inp-ytsecret').value = state.settings.ytClientSecret || '';
-  id('inp-genius').value   = state.settings.geniusToken || '';
+  id('inp-token').value      = state.settings.token    || '';
+  id('inp-user').value       = state.settings.username || '';
+  id('inp-ytkey').value      = state.settings.ytApiKey  || '';
+  id('inp-ytclient').value   = state.settings.ytClientId || '';
+  id('inp-ytsecret').value   = state.settings.ytClientSecret || '';
+  id('inp-genius').value     = state.settings.geniusToken || '';
+  id('inp-fb-apikey').value  = state.settings.firebaseApiKey  || '';
+  id('inp-fb-project').value = state.settings.firebaseProjectId || '';
   if (ytAccessToken) {
     id('yt-auth-status').innerHTML = '<span class="yt-connected">✓ YouTube connected</span>';
     id('btn-yt-signin').disabled = true;
   }
 }
 function saveSettings() {
-  state.settings.token      = id('inp-token').value.trim();
-  state.settings.username   = id('inp-user').value.trim();
-  state.settings.ytApiKey   = id('inp-ytkey').value.trim();
-  state.settings.ytClientId     = id('inp-ytclient').value.trim();
-  state.settings.ytClientSecret = id('inp-ytsecret').value.trim();
-  state.settings.geniusToken    = id('inp-genius').value.trim();
+  state.settings.token             = id('inp-token').value.trim();
+  state.settings.username          = id('inp-user').value.trim();
+  state.settings.ytApiKey          = id('inp-ytkey').value.trim();
+  state.settings.ytClientId        = id('inp-ytclient').value.trim();
+  state.settings.ytClientSecret    = id('inp-ytsecret').value.trim();
+  state.settings.geniusToken       = id('inp-genius').value.trim();
+  state.settings.firebaseApiKey    = id('inp-fb-apikey').value.trim();
+  state.settings.firebaseProjectId = id('inp-fb-project').value.trim();
   save();
   id('settings-status').innerHTML = '<span style="color:var(--success)">✓ Saved!</span>';
   toast('Settings saved', 'success');
@@ -4202,6 +4343,11 @@ function _saveCustomLyrics(artist, title, lines) {
     savedAt: new Date().toISOString().slice(0, 10)
   };
   save();
+  // ── Community contribution: upload in background (fire-and-forget) ──
+  // Only if Firebase is configured in settings
+  if (state.settings.firebaseApiKey && state.settings.firebaseProjectId) {
+    _uploadCommunityLyrics(artist, title, lines);
+  }
 }
 function _deleteCustomLyrics(artist, title) {
   if (!state.customLyrics) return;
@@ -4728,6 +4874,13 @@ async function fetchDJLyrics(track) {
     renderDJLyricsPanel(); return;
   }
 
+  // ── Priority 0.5: community tap-synced lyrics (shared via Firebase) ──
+  const community = await _fetchCommunityLyrics(artist, title);
+  if (community) {
+    _djLyrics = { ...community };
+    renderDJLyricsPanel(); return;
+  }
+
   // Wait briefly if duration not yet known (YouTube player may not have reported it yet)
   if (!_djTrackDuration) await new Promise(r => setTimeout(r, 800));
   const dur = Math.round(_djTrackDuration) || 0;
@@ -4771,12 +4924,15 @@ function renderDJLyricsPanel() {
   }
   if (_djLyrics.lines?.length) {
     // Badge: custom tap-sync takes priority
-    const isCustom = _djLyrics.source === 'tap-sync';
+    const isCustom    = _djLyrics.source === 'tap-sync';
+    const isCommunity = _djLyrics.source === 'community';
     const badge = isCustom
       ? `<div class="dj-lyrics-badge dj-lyrics-badge--custom">🎯 Tap-sync &nbsp;<button class="btn btn-ghost btn-sm" style="font-size:0.7rem;padding:0.15rem 0.4rem;margin-left:0.3rem;" onclick="startTapSync()" title="Re-sincronizar">↺ re-sync</button></div>`
-      : _djLyrics.synced
-        ? `<div class="dj-lyrics-badge dj-lyrics-badge--sync">● Sincronizado</div>`
-        : `<div class="dj-lyrics-badge dj-lyrics-badge--est">◐ Timing estimado</div>`;
+      : isCommunity
+        ? `<div class="dj-lyrics-badge dj-lyrics-badge--community">☁️ Comunidade &nbsp;<button class="btn btn-ghost btn-sm" style="font-size:0.7rem;padding:0.15rem 0.4rem;margin-left:0.3rem;" onclick="startTapSync()" title="Melhorar sincronização">↺ melhorar</button></div>`
+        : _djLyrics.synced
+          ? `<div class="dj-lyrics-badge dj-lyrics-badge--sync">● Sincronizado</div>`
+          : `<div class="dj-lyrics-badge dj-lyrics-badge--est">◐ Timing estimado</div>`;
     content.innerHTML = badge + _djLyrics.lines.map((l, i) =>
       `<div class="dj-lyric-line" id="dj-ll-${i}" data-t="${l.time}">${esc(l.text)}</div>`
     ).join('');
@@ -4888,6 +5044,13 @@ async function fetchCatLyrics(artist, title) {
     renderCatLyricsPanel(); return;
   }
 
+  // ── Priority 0.5: community tap-synced lyrics (shared via Firebase) ──
+  const community = await _fetchCommunityLyrics(artist, title);
+  if (community) {
+    _catLyrics = { ...community };
+    renderCatLyricsPanel(); return;
+  }
+
   content.innerHTML = `<div class="dj-lyrics-status"><div class="dj-lyrics-dot"></div>A procurar letras…</div>`;
 
   // Wait briefly if duration not yet known
@@ -4924,12 +5087,15 @@ function renderCatLyricsPanel() {
     content.innerHTML = `<div class="dj-lyrics-status" style="opacity:0.5;">🎹 Instrumental</div>`; return;
   }
   if (_catLyrics.lines?.length) {
-    const isCustom = _catLyrics.source === 'tap-sync';
+    const isCustom    = _catLyrics.source === 'tap-sync';
+    const isCommunity = _catLyrics.source === 'community';
     const badge = isCustom
       ? `<div class="dj-lyrics-badge dj-lyrics-badge--custom">🎯 Tap-sync &nbsp;<button class="btn btn-ghost btn-sm" style="font-size:0.7rem;padding:0.15rem 0.4rem;margin-left:0.3rem;" onclick="startTapSync()" title="Re-sincronizar">↺ re-sync</button></div>`
-      : _catLyrics.synced
-        ? `<div class="dj-lyrics-badge dj-lyrics-badge--sync">● Sincronizado</div>`
-        : `<div class="dj-lyrics-badge dj-lyrics-badge--est">◐ Timing estimado</div>`;
+      : isCommunity
+        ? `<div class="dj-lyrics-badge dj-lyrics-badge--community">☁️ Comunidade &nbsp;<button class="btn btn-ghost btn-sm" style="font-size:0.7rem;padding:0.15rem 0.4rem;margin-left:0.3rem;" onclick="startTapSync()" title="Melhorar sincronização">↺ melhorar</button></div>`
+        : _catLyrics.synced
+          ? `<div class="dj-lyrics-badge dj-lyrics-badge--sync">● Sincronizado</div>`
+          : `<div class="dj-lyrics-badge dj-lyrics-badge--est">◐ Timing estimado</div>`;
     content.innerHTML = badge + _catLyrics.lines.map((l, i) =>
       `<div class="dj-lyric-line" id="cat-ll-${i}" data-t="${l.time}">${esc(l.text)}</div>`
     ).join('');
