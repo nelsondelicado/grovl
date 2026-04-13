@@ -2509,7 +2509,7 @@ function showDetail(recId) {
 
   const ytPlayerHtml = r.ytVideoId
     ? `<div id="cat-player-container">
-        <iframe id="cat-yt-iframe"
+        <iframe id="cat-yt-preview"
           src="https://www.youtube.com/embed/${esc(r.ytVideoId)}?autoplay=0&enablejsapi=1&origin=${encodeURIComponent(location.protocol === 'https:' ? location.origin : 'https://www.youtube.com')}"
           allowfullscreen allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
           loading="lazy" style="width:100%;aspect-ratio:16/9;border:none;display:block;"></iframe>
@@ -4640,7 +4640,12 @@ function _migrateIframeToView() {
   if (!ifr) return;
   const targetId = _miniPlayerMode === 'dj' ? 'dj-player-container' : 'cat-player-container';
   const container = id(targetId);
-  if (container) container.appendChild(ifr);  // move back into the view
+  if (container) {
+    // Remove any static preview iframe (cat-yt-preview) that renderDetail may have placed
+    // so the playing iframe has a clean container to return to.
+    container.querySelectorAll('iframe:not(#dj-yt-iframe):not(#cat-yt-iframe)').forEach(p => p.remove());
+    container.appendChild(ifr);
+  }
 }
 
 // ── Kill helpers (stops audio, removes iframe from DOM) ───────────────────────
@@ -4882,12 +4887,14 @@ function setLyricsMode(mode) {
 
   if (mode === 'video') {
     slot.classList.remove('hidden');
-    // Move the active iframe into the video slot (DOM migration — no reload)
-    if (_miniPlayerMode === 'dj') {
-      const ifr = id('dj-yt-iframe') || id('mini-player-video')?.querySelector('iframe');
-      if (ifr && !slot.contains(ifr)) slot.appendChild(ifr);
-    } else if (_miniPlayerMode === 'cat') {
-      const ifr = id('cat-yt-iframe') || id('mini-player-video')?.querySelector('iframe');
+    // Find the PLAYING iframe (never the static cat-yt-preview).
+    // Priority: already in slot → mini-player-video → player container
+    if (_miniPlayerMode === 'dj' || _miniPlayerMode === 'cat') {
+      const expectedId = _miniPlayerMode === 'dj' ? 'dj-yt-iframe' : 'cat-yt-iframe';
+      const ifr =
+        slot.querySelector('iframe') ||                            // already there
+        id('mini-player-video')?.querySelector('iframe') ||       // migrated to mini-player
+        id(expectedId);                                            // still in player container
       if (ifr && !slot.contains(ifr)) slot.appendChild(ifr);
     }
   } else {
