@@ -498,6 +498,27 @@ label { display: block; color: var(--text-dim); font-size: 0.8rem; margin-bottom
 .tap-sync-actions { display:flex; gap:0.5rem; margin-top:0.6rem; }
 .tap-sync-actions button { flex:1; padding:0.5rem; font-size:0.8rem; border-radius:0.5rem; border:1px solid var(--border); background:var(--surface); color:var(--text-muted); cursor:pointer; font-family:inherit; }
 .tap-sync-actions button:hover { border-color:var(--accent); color:var(--text); }
+/* ── Mini Player ─────────────────────────────────────────────────────── */
+.mini-player {
+  display: none; position: fixed; bottom: 0; left: 0; right: 0; z-index: 890;
+  background: var(--surface); border-top: 2px solid var(--accent);
+  box-shadow: 0 -4px 28px rgba(0,0,0,0.22);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+}
+.mini-player.mp-active { display: block; }
+.mini-player-bar { display:flex; align-items:center; gap:0.75rem; padding:0.55rem 1rem 0.55rem; }
+.mini-player-info { display:flex; align-items:center; gap:0.65rem; flex:1; min-width:0; cursor:pointer; padding:0.15rem 0; }
+.mini-player-info:hover .mini-player-title { color:var(--accent); }
+.mini-player-pulse { width:8px; height:8px; border-radius:50%; background:var(--accent); animation:pulse 1.4s ease-in-out infinite; flex-shrink:0; }
+.mini-player-text { min-width:0; }
+.mini-player-title { font-weight:600; font-size:0.88rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text); transition:color 0.15s; }
+.mini-player-sub { font-size:0.73rem; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.mini-player-controls { display:flex; align-items:center; gap:0.1rem; flex-shrink:0; }
+.mp-btn { background:none; border:none; cursor:pointer; font-size:1.05rem; padding:0.35rem 0.5rem; border-radius:0.35rem; color:var(--text-muted); transition:background 0.15s,color 0.15s; font-family:inherit; line-height:1; }
+.mp-btn:hover { background:var(--surface2); color:var(--text); }
+.mp-btn.mp-stop { color:#e57373; }
+.mp-btn.mp-stop:hover { background:rgba(229,115,115,0.1); }
+body.has-mini-player { padding-bottom: 54px; }
 /* ── Lyrics Modal ─────────────────────────────────────────────────────── */
 .lyrics-modal {
   position: fixed; inset: 0; z-index: 9999;
@@ -1462,6 +1483,23 @@ function load() {
 
 // ── ROUTING ──────────────────────────────────────────────────────
 function showView(name) {
+  // ── Mini-player iframe migration ─────────────────────────────────────
+  // DJ lives in 'djsets'; Cat lives in 'detail'.
+  // When leaving the active player's home view → move iframe to mini-player
+  // (audio continues). When returning → move iframe back into the view.
+  const DJ_VIEW  = 'djsets';
+  const CAT_VIEW = 'detail';
+  const fromEl   = document.querySelector('.view.active');
+  const fromName = fromEl?.id?.replace('view-', '');
+
+  if (fromName && fromName !== name && _miniPlayerMode) {
+    // Leaving the active player's home view → migrate to background slot
+    if ((_miniPlayerMode === 'dj'  && fromName === DJ_VIEW) ||
+        (_miniPlayerMode === 'cat' && fromName === CAT_VIEW)) {
+      _migrateIframeToMini();
+    }
+  }
+  // ──────────────────────────────────────────────────────────────────────
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
   const v = document.getElementById(`view-${name}`);
@@ -1474,6 +1512,19 @@ function showView(name) {
   if (name === 'market')     initMarketView();
   if (name === 'djsets')     initDJView();
   window.scrollTo(0, 0);
+
+  // Returning to the active player's home view → move iframe back into the view
+  if (_miniPlayerMode) {
+    if ((_miniPlayerMode === 'dj'  && name === DJ_VIEW) ||
+        (_miniPlayerMode === 'cat' && name === CAT_VIEW)) {
+      // For cat: only migrate back if the container exists and is empty
+      // (it may have been re-rendered with a different record)
+      const catC = id('cat-player-container');
+      if (_miniPlayerMode === 'dj' || (catC && catC.children.length === 0)) {
+        _migrateIframeToView();
+      }
+    }
+  }
 }
 function switchTab(id) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -4339,6 +4390,96 @@ function _tapSyncKeyHandler(e) {
   }
 }
 
+// ── Mini Player ───────────────────────────────────────────────────────────────
+// _miniPlayerMode: null | 'dj' | 'cat'
+// The active iframe migrates between its view-container and #mini-player-video
+// using DOM node moves (not innerHTML replacements), so audio never stops.
+let _miniPlayerMode = null;
+
+// ── Iframe migration: move node without reload ────────────────────────────────
+function _migrateIframeToMini() {
+  const slot = id('mini-player-video');
+  if (!slot) return;
+  const ifr = _miniPlayerMode === 'dj'
+    ? id('dj-yt-iframe')
+    : id('cat-yt-iframe');
+  if (ifr) slot.appendChild(ifr);          // DOM move — no reload, audio continues
+}
+
+function _migrateIframeToView() {
+  const slot = id('mini-player-video');
+  if (!slot) return;
+  const ifr = slot.querySelector('iframe');
+  if (!ifr) return;
+  const targetId = _miniPlayerMode === 'dj' ? 'dj-player-container' : 'cat-player-container';
+  const container = id(targetId);
+  if (container) container.appendChild(ifr);  // move back into the view
+}
+
+// ── Kill helpers (stops audio, removes iframe from DOM) ───────────────────────
+function _killDJIframe() {
+  const ifr = id('dj-yt-iframe');
+  if (ifr) ifr.remove();
+}
+function _killCatIframe() {
+  const ifr = id('cat-yt-iframe');
+  if (ifr) ifr.remove();
+}
+
+// ── Update the mini-player bar UI ─────────────────────────────────────────────
+function _updateMiniPlayer() {
+  const mp   = id('mini-player');
+  const prev = id('mp-prev');
+  const next = id('mp-next');
+  if (!mp) return;
+
+  if (_miniPlayerMode === 'dj' && djCurrentSet) {
+    const track  = djCurrentSet.tracks[djCurrentIdx] || {};
+    const title  = track.title  || djCurrentSet.name || '—';
+    const artist = djCurrentSet.artist || track.channel || '';
+    const pos    = `${djCurrentIdx + 1} / ${djCurrentSet.tracks.length}`;
+    id('mini-player-title').textContent = title;
+    id('mini-player-sub').textContent   = artist ? `${artist} · ${pos}` : pos;
+    if (prev) prev.style.display = '';
+    if (next) next.style.display = '';
+    mp.classList.add('mp-active');
+    document.body.classList.add('has-mini-player');
+
+  } else if (_miniPlayerMode === 'cat' && _catCurrentTrack) {
+    id('mini-player-title').textContent = _catCurrentTrack.title  || '—';
+    id('mini-player-sub').textContent   = _catCurrentTrack.artist || '';
+    if (prev) prev.style.display = 'none';
+    if (next) next.style.display = 'none';
+    mp.classList.add('mp-active');
+    document.body.classList.add('has-mini-player');
+
+  } else {
+    mp.classList.remove('mp-active');
+    document.body.classList.remove('has-mini-player');
+  }
+}
+
+// ── Mini-player controls ──────────────────────────────────────────────────────
+function miniPlayerGoTo() {
+  if (_miniPlayerMode === 'dj')  showView('djsets');
+  else if (_miniPlayerMode === 'cat') showView('detail');
+}
+function miniPlayerPrev() { if (_miniPlayerMode === 'dj') djPrev(); }
+function miniPlayerNext() { if (_miniPlayerMode === 'dj') djNext(); }
+
+function miniPlayerStop() {
+  _killDJIframe();
+  _killCatIframe();
+  // Clear slot too (in case iframe was moved there)
+  const slot = id('mini-player-video');
+  if (slot) slot.innerHTML = '';
+  _miniPlayerMode = null;
+  _updateMiniPlayer();
+  // Reset DJ state so player section goes blank
+  const dc = id('dj-player-container');
+  if (dc) dc.innerHTML = '';
+}
+
 function openLyricsModal(title, artist) {
   const modal = id('lyrics-modal');
   if (!modal) return;
@@ -4657,6 +4798,15 @@ function renderDJLyricsPanel() {
 // ── Catalogue (record detail) lyrics functions ───────────────────────────────
 
 function playDetailTrack(videoId, artist, title) {
+  // ── Mutual exclusion: stop DJ player if it was active ────────────────
+  if (_miniPlayerMode === 'dj') {
+    _killDJIframe();
+    // Keep djCurrentSet so user can resume; just clear the iframe
+  }
+  // Kill any previous cat iframe (covers re-play same track or new track)
+  _killCatIframe();
+  _miniPlayerMode = 'cat';
+
   _catCurrentTrack  = { videoId, artist, title };
   _catLyrics        = null;
   _catLyricsLine    = -1;
@@ -4700,6 +4850,9 @@ function playDetailTrack(videoId, artist, title) {
   document.querySelectorAll('.tr-play-btn').forEach(b => b.classList.remove('tr-play-active'));
   const activeBtn = document.querySelector(`.tr-play-btn[data-vid="${videoId}"]`);
   if (activeBtn) activeBtn.classList.add('tr-play-active');
+
+  // ── Update mini-player bar ───────────────────────────────────────────
+  _updateMiniPlayer();
 }
 
 function toggleCatLyrics() {
@@ -5346,6 +5499,13 @@ function playDJTrack(idx) {
   djCurrentIdx = idx;
   const t = djCurrentSet.tracks[idx];
 
+  // ── Mutual exclusion: stop Cat player if it was active ──────────────
+  if (_miniPlayerMode === 'cat') {
+    _killCatIframe();
+    _catCurrentTrack = null; _catLyrics = null; _catLyricsLine = -1;
+  }
+  _miniPlayerMode = 'dj';
+
   // Highlight row
   document.querySelectorAll('.dj-track').forEach((el, i) => {
     el.classList.toggle('playing', i === idx);
@@ -5432,6 +5592,9 @@ function playDJTrack(idx) {
     fetchDJLyrics(t);
     setTimeout(() => { if (_djLyrics === null) fetchDJLyrics(t); }, 2500);
   }
+
+  // ── Update mini-player bar (title, artist, track counter) ───────────
+  _updateMiniPlayer();
 }
 
 function djNext() {
@@ -5454,6 +5617,9 @@ function removeDJTrack(idx) {
   else {
     id('dj-set-controls').classList.add('hidden');
     id('dj-player-section').classList.add('hidden');
+    _killDJIframe();
+    _miniPlayerMode = null;
+    _updateMiniPlayer();
   }
 }
 
@@ -5656,6 +5822,30 @@ function updateDJSavedCount() {
     </div>
     <div class="lyrics-modal-body" id="lyrics-modal-body">
       <div id="lyrics-modal-content"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Mini Player ────────────────────────────────────────────────────────────
+     Sits outside all .view containers so it's never hidden by showView().
+     The active YouTube iframe migrates here when the user navigates away from
+     the player view — audio continues without interruption.
+     ────────────────────────────────────────────────────────────────────── -->
+<div id="mini-player" class="mini-player" role="complementary" aria-label="Mini player">
+  <!-- Hidden 0×0 slot — iframe lives here while playing in background -->
+  <div id="mini-player-video" style="width:0;height:0;overflow:hidden;position:absolute;pointer-events:none;"></div>
+  <div class="mini-player-bar">
+    <div class="mini-player-info" onclick="miniPlayerGoTo()" title="Voltar ao player">
+      <div class="mini-player-pulse"></div>
+      <div class="mini-player-text">
+        <div class="mini-player-title" id="mini-player-title">—</div>
+        <div class="mini-player-sub"   id="mini-player-sub"></div>
+      </div>
+    </div>
+    <div class="mini-player-controls">
+      <button id="mp-prev" class="mp-btn" onclick="miniPlayerPrev()" title="Faixa anterior" style="display:none;">⏮</button>
+      <button id="mp-next" class="mp-btn" onclick="miniPlayerNext()" title="Próxima faixa"  style="display:none;">⏭</button>
+      <button class="mp-btn mp-stop"      onclick="miniPlayerStop()" title="Parar música">■</button>
     </div>
   </div>
 </div>
