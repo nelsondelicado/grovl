@@ -4398,7 +4398,7 @@ function _scrollLyricsTo(curEl) {
   if (_lyricsViewMode === 'video') {
     // Slide content so active line sits ~28% from the top of the lyrics window.
     // This leaves a line or two visible above — gives the "slightly behind" karaoke feel.
-    const margin = Math.round(panel.clientHeight * 0.28);
+    const margin = Math.round(panel.clientHeight * 0.40);
     const ty = Math.min(0, -(curEl.offsetTop - margin));
     if (content) content.style.transform = `translateY(${ty}px)`;
   } else {
