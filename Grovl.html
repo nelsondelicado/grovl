@@ -520,6 +520,24 @@ label { display: block; color: var(--text-dim); font-size: 0.8rem; margin-bottom
 .mp-btn.mp-stop { color:#e57373; }
 .mp-btn.mp-stop:hover { background:rgba(229,115,115,0.1); }
 body.has-mini-player { padding-bottom: 54px; }
+/* ── Karaoke mode toggle ─────────────────────────────────────────────── */
+.lyrics-mode-toggle { display:flex; gap:0.25rem; align-items:center; }
+.lyrics-mode-btn { font-size:0.72rem; padding:0.28rem 0.6rem; border-radius:20px; border:1px solid var(--border); background:none; cursor:pointer; color:var(--text-muted); transition:all 0.15s; font-family:inherit; line-height:1.2; }
+.lyrics-mode-btn.lm-active { background:var(--accent); color:white; border-color:var(--accent); }
+/* ── Video slot (video mode) ─────────────────────────────────────────── */
+.lyrics-modal-video-slot { width:100%; aspect-ratio:16/9; background:#000; flex-shrink:0; overflow:hidden; }
+.lyrics-modal-video-slot iframe { width:100% !important; height:100% !important; border:none; display:block; aspect-ratio:16/9; }
+.lyrics-modal-video-slot.hidden { display:none; }
+/* ── Immersive mode ──────────────────────────────────────────────────── */
+.mode-immersive { background:linear-gradient(160deg,#07070f 0%,#0e0e1c 100%) !important; }
+.mode-immersive .lyrics-modal-header { background:rgba(0,0,0,0.4) !important; border-bottom-color:rgba(255,255,255,0.06) !important; }
+.mode-immersive .lyrics-modal-body { padding:1.5rem 1.5rem 9rem; }
+.mode-immersive #lyrics-modal-content { display:flex; flex-direction:column; align-items:center; text-align:center; }
+.mode-immersive .dj-lyric-line { text-align:center; font-size:1.05rem; padding:0.45rem 1.2rem; max-width:88%; border-radius:0.5rem; }
+.mode-immersive .dj-lyric-line.active { font-size:1.7rem !important; font-weight:800 !important; color:var(--accent) !important; text-shadow:0 0 40px rgba(232,94,5,0.5); padding:0.8rem 1.5rem; letter-spacing:0.01em; }
+.mode-immersive .dj-lyrics-badge { align-self:center; }
+/* ── Video mode ──────────────────────────────────────────────────────── */
+.mode-video .lyrics-modal-body { padding:1.2rem 1.5rem 7rem; }
 /* ── Lyrics Modal ─────────────────────────────────────────────────────── */
 .lyrics-modal {
   position: fixed; inset: 0; z-index: 9999;
@@ -1522,8 +1540,11 @@ function showView(name) {
 
   if (fromName && fromName !== name && _miniPlayerMode) {
     // Leaving the active player's home view → migrate to background slot
-    if ((_miniPlayerMode === 'dj'  && fromName === DJ_VIEW) ||
-        (_miniPlayerMode === 'cat' && fromName === CAT_VIEW)) {
+    // (skip if lyrics modal has the iframe in its video slot)
+    const lyricsHasVideo = _lyricsViewMode === 'video' && id('lyrics-modal-video-slot')?.querySelector('iframe');
+    if (!lyricsHasVideo &&
+        ((_miniPlayerMode === 'dj'  && fromName === DJ_VIEW) ||
+         (_miniPlayerMode === 'cat' && fromName === CAT_VIEW))) {
       _migrateIframeToMini();
     }
   }
@@ -1542,9 +1563,12 @@ function showView(name) {
   window.scrollTo(0, 0);
 
   // Returning to the active player's home view → move iframe back into the view
+  // (skip if lyrics modal currently owns the iframe in video mode)
   if (_miniPlayerMode) {
-    if ((_miniPlayerMode === 'dj'  && name === DJ_VIEW) ||
-        (_miniPlayerMode === 'cat' && name === CAT_VIEW)) {
+    const lyricsHasVideo = _lyricsViewMode === 'video' && id('lyrics-modal-video-slot')?.querySelector('iframe');
+    if (!lyricsHasVideo &&
+        ((_miniPlayerMode === 'dj'  && name === DJ_VIEW) ||
+         (_miniPlayerMode === 'cat' && name === CAT_VIEW))) {
       // For cat: only migrate back if the container exists and is empty
       // (it may have been re-rendered with a different record)
       const catC = id('cat-player-container');
@@ -4626,6 +4650,58 @@ function miniPlayerStop() {
   if (dc) dc.innerHTML = '';
 }
 
+function miniPlayerLyrics() {
+  if (_miniPlayerMode === 'dj')  toggleDJLyrics();
+  else if (_miniPlayerMode === 'cat') toggleCatLyrics();
+}
+
+// ── Karaoke view mode ─────────────────────────────────────────────────────────
+let _lyricsViewMode = 'immersive'; // 'immersive' | 'video'
+
+function setLyricsMode(mode) {
+  _lyricsViewMode = mode;
+  const sheet = document.querySelector('.lyrics-modal-sheet');
+  if (sheet) {
+    sheet.classList.toggle('mode-immersive', mode === 'immersive');
+    sheet.classList.toggle('mode-video',     mode === 'video');
+  }
+  // Update toggle button active states
+  const bi = id('lm-btn-immersive');
+  const bv = id('lm-btn-video');
+  if (bi) bi.classList.toggle('lm-active', mode === 'immersive');
+  if (bv) bv.classList.toggle('lm-active', mode === 'video');
+
+  // Manage video slot visibility and iframe migration
+  const slot = id('lyrics-modal-video-slot');
+  if (!slot) return;
+
+  if (mode === 'video') {
+    slot.classList.remove('hidden');
+    // Move the active iframe into the video slot (DOM migration — no reload)
+    if (_miniPlayerMode === 'dj') {
+      const ifr = id('dj-yt-iframe') || id('mini-player-video')?.querySelector('iframe');
+      if (ifr && !slot.contains(ifr)) slot.appendChild(ifr);
+    } else if (_miniPlayerMode === 'cat') {
+      const ifr = id('cat-yt-iframe') || id('mini-player-video')?.querySelector('iframe');
+      if (ifr && !slot.contains(ifr)) slot.appendChild(ifr);
+    }
+  } else {
+    // Moving back to immersive: return iframe to its original container
+    const ifr = slot.querySelector('iframe');
+    if (ifr) {
+      if (_miniPlayerMode === 'dj') {
+        const cont = id('dj-player-container');
+        if (cont) cont.appendChild(ifr); else id('mini-player-video')?.appendChild(ifr);
+      } else if (_miniPlayerMode === 'cat') {
+        const cont = id('cat-player-container');
+        if (cont && cont.children.length === 0) cont.appendChild(ifr);
+        else id('mini-player-video')?.appendChild(ifr);
+      }
+    }
+    slot.classList.add('hidden');
+  }
+}
+
 function openLyricsModal(title, artist) {
   const modal = id('lyrics-modal');
   if (!modal) return;
@@ -4638,6 +4714,8 @@ function openLyricsModal(title, artist) {
   if (c) c.innerHTML = `<div class="dj-lyrics-status"><div class="dj-lyrics-dot"></div>A procurar letras…</div>`;
   modal.classList.remove('hidden');
   document.body.style.overflow = 'hidden';
+  // Apply current mode
+  setLyricsMode(_lyricsViewMode);
 }
 
 function closeLyricsModal() {
@@ -4647,6 +4725,22 @@ function closeLyricsModal() {
     _tapSyncState = null;
     const btn = id('tap-sync-btn');
     if (btn) { btn.textContent = '🎯 Sync'; btn.onclick = startTapSync; }
+  }
+  // If in video mode, return iframe to its rightful home before hiding modal
+  if (_lyricsViewMode === 'video') {
+    const slot = id('lyrics-modal-video-slot');
+    const ifr = slot?.querySelector('iframe');
+    if (ifr) {
+      if (_miniPlayerMode === 'dj') {
+        const cont = id('dj-player-container');
+        if (cont) cont.appendChild(ifr); else id('mini-player-video')?.appendChild(ifr);
+      } else if (_miniPlayerMode === 'cat') {
+        const cont = id('cat-player-container');
+        if (cont && cont.children.length === 0) cont.appendChild(ifr);
+        else id('mini-player-video')?.appendChild(ifr);
+      }
+    }
+    if (slot) slot.classList.add('hidden');
   }
   const modal = id('lyrics-modal');
   if (modal) modal.classList.add('hidden');
@@ -5982,10 +6076,15 @@ function updateDJSavedCount() {
         <span id="lyrics-modal-artist" class="lyrics-modal-track-artist"></span>
       </div>
       <div class="lyrics-modal-controls">
+        <div class="lyrics-mode-toggle" id="lyrics-mode-toggle">
+          <button class="lyrics-mode-btn lm-active" id="lm-btn-immersive" onclick="setLyricsMode('immersive')" title="Modo imersivo">🎵</button>
+          <button class="lyrics-mode-btn" id="lm-btn-video" onclick="setLyricsMode('video')" title="Modo vídeo">📺</button>
+        </div>
         <button id="tap-sync-btn" class="btn btn-ghost btn-sm" onclick="startTapSync()" title="Sincronizar letras por tap" style="font-size:0.78rem;padding:0.35rem 0.6rem;">🎯 Sync</button>
         <button class="btn btn-ghost btn-sm lyrics-modal-close-btn" onclick="closeLyricsModal()" title="Fechar letras">✕</button>
       </div>
     </div>
+    <div id="lyrics-modal-video-slot" class="lyrics-modal-video-slot hidden"></div>
     <div class="lyrics-modal-body" id="lyrics-modal-body">
       <div id="lyrics-modal-content"></div>
     </div>
@@ -6009,9 +6108,10 @@ function updateDJSavedCount() {
       </div>
     </div>
     <div class="mini-player-controls">
-      <button id="mp-prev" class="mp-btn" onclick="miniPlayerPrev()" title="Faixa anterior" style="display:none;">⏮</button>
-      <button id="mp-next" class="mp-btn" onclick="miniPlayerNext()" title="Próxima faixa"  style="display:none;">⏭</button>
-      <button class="mp-btn mp-stop"      onclick="miniPlayerStop()" title="Parar música">■</button>
+      <button id="mp-prev"   class="mp-btn" onclick="miniPlayerPrev()"   title="Faixa anterior" style="display:none;">⏮</button>
+      <button id="mp-next"   class="mp-btn" onclick="miniPlayerNext()"   title="Próxima faixa"  style="display:none;">⏭</button>
+      <button id="mp-lyrics" class="mp-btn" onclick="miniPlayerLyrics()" title="Letras">🎤</button>
+      <button class="mp-btn mp-stop"        onclick="miniPlayerStop()"   title="Parar música">■</button>
     </div>
   </div>
 </div>
