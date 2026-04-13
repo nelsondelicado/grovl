@@ -4396,9 +4396,10 @@ function _scrollLyricsTo(curEl) {
   if (!curEl || !panel) return;
 
   if (_lyricsViewMode === 'video') {
-    // Slide content up so active line is 16px from the top of the lyrics window.
-    // Clamp at 0 so the very first lines don't push content below its start.
-    const ty = Math.min(0, -(curEl.offsetTop - 16));
+    // Slide content so active line sits ~28% from the top of the lyrics window.
+    // This leaves a line or two visible above — gives the "slightly behind" karaoke feel.
+    const margin = Math.round(panel.clientHeight * 0.28);
+    const ty = Math.min(0, -(curEl.offsetTop - margin));
     if (content) content.style.transform = `translateY(${ty}px)`;
   } else {
     // Immersive: plain scroll, line centred
