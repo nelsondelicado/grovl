@@ -1569,11 +1569,8 @@ function showView(name) {
 
   if (fromName && fromName !== name && _miniPlayerMode) {
     // Leaving the active player's home view → migrate to background slot
-    // (skip if lyrics modal has the iframe in its video slot)
-    const lyricsHasVideo = _lyricsViewMode === 'video' && id('lyrics-modal-video-slot')?.querySelector('iframe');
-    if (!lyricsHasVideo &&
-        ((_miniPlayerMode === 'dj'  && fromName === DJ_VIEW) ||
-         (_miniPlayerMode === 'cat' && fromName === CAT_VIEW))) {
+    if ((_miniPlayerMode === 'dj'  && fromName === DJ_VIEW) ||
+        (_miniPlayerMode === 'cat' && fromName === CAT_VIEW)) {
       _migrateIframeToMini();
     }
   }
@@ -1592,12 +1589,9 @@ function showView(name) {
   window.scrollTo(0, 0);
 
   // Returning to the active player's home view → move iframe back into the view
-  // (skip if lyrics modal currently owns the iframe in video mode)
   if (_miniPlayerMode) {
-    const lyricsHasVideo = _lyricsViewMode === 'video' && id('lyrics-modal-video-slot')?.querySelector('iframe');
-    if (!lyricsHasVideo &&
-        ((_miniPlayerMode === 'dj'  && name === DJ_VIEW) ||
-         (_miniPlayerMode === 'cat' && name === CAT_VIEW))) {
+    if ((_miniPlayerMode === 'dj'  && name === DJ_VIEW) ||
+        (_miniPlayerMode === 'cat' && name === CAT_VIEW)) {
       // For cat: only migrate back if the container exists and is empty
       // (it may have been re-rendered with a different record)
       const catC = id('cat-player-container');
@@ -4648,6 +4642,18 @@ function _migrateIframeToView() {
   }
 }
 
+// ── Mute / unmute the background player so the karaoke slot has no audio echo ──
+function _muteActivePlayer() {
+  const ifr = _miniPlayerMode === 'dj' ? id('dj-yt-iframe') : id('cat-yt-iframe');
+  if (!ifr) return;
+  try { ifr.contentWindow.postMessage(JSON.stringify({event:'command',func:'mute',args:[]}), 'https://www.youtube.com'); } catch(_) {}
+}
+function _unmuteActivePlayer() {
+  const ifr = _miniPlayerMode === 'dj' ? id('dj-yt-iframe') : id('cat-yt-iframe');
+  if (!ifr) return;
+  try { ifr.contentWindow.postMessage(JSON.stringify({event:'command',func:'unMute',args:[]}), 'https://www.youtube.com'); } catch(_) {}
+}
+
 // ── Kill helpers (stops audio, removes iframe from DOM) ───────────────────────
 function _killDJIframe() {
   const ifr = id('dj-yt-iframe');
@@ -4886,31 +4892,41 @@ function setLyricsMode(mode) {
   if (!slot) return;
 
   if (mode === 'video') {
-    slot.classList.remove('hidden');
-    // Find the PLAYING iframe (never the static cat-yt-preview).
-    // Priority: already in slot → mini-player-video → player container
-    if (_miniPlayerMode === 'dj' || _miniPlayerMode === 'cat') {
-      const expectedId = _miniPlayerMode === 'dj' ? 'dj-yt-iframe' : 'cat-yt-iframe';
-      const ifr =
-        slot.querySelector('iframe') ||                            // already there
-        id('mini-player-video')?.querySelector('iframe') ||       // migrated to mini-player
-        id(expectedId);                                            // still in player container
-      if (ifr && !slot.contains(ifr)) slot.appendChild(ifr);
+    // Get the current videoId and playback position from state
+    let videoId = null, startSec = 0;
+    if (_miniPlayerMode === 'cat' && _catCurrentTrack) {
+      videoId  = _catCurrentTrack.videoId;
+      startSec = Math.max(0, Math.floor(_catLastTime || 0));
+    } else if (_miniPlayerMode === 'dj' && djCurrentSet) {
+      videoId  = djCurrentSet.tracks?.[djCurrentIdx]?.videoId;
+      startSec = Math.max(0, Math.floor(_djLastTime || 0));
+    }
+
+    if (videoId) {
+      slot.classList.remove('hidden');
+      // Create a fresh iframe in the slot at the correct timestamp.
+      // This is more reliable than DOM migration (no race conditions).
+      const origin = (location.protocol === 'https:' || location.protocol === 'http:')
+        ? location.origin : 'https://www.youtube.com';
+      const params = [
+        'enablejsapi=1', 'autoplay=1', 'rel=0', 'modestbranding=1',
+        `start=${startSec}`,
+        `origin=${encodeURIComponent(origin)}`
+      ].join('&');
+      slot.innerHTML = `<iframe
+        src="https://www.youtube.com/embed/${videoId}?${params}"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+        allowfullscreen style="width:100%;height:100%;border:none;display:block;"></iframe>`;
+      // Mute the original player so there's no double audio
+      _muteActivePlayer();
+    } else {
+      slot.classList.add('hidden');
     }
   } else {
-    // Moving back to immersive: return iframe to its original container
-    const ifr = slot.querySelector('iframe');
-    if (ifr) {
-      if (_miniPlayerMode === 'dj') {
-        const cont = id('dj-player-container');
-        if (cont) cont.appendChild(ifr); else id('mini-player-video')?.appendChild(ifr);
-      } else if (_miniPlayerMode === 'cat') {
-        const cont = id('cat-player-container');
-        if (cont && cont.children.length === 0) cont.appendChild(ifr);
-        else id('mini-player-video')?.appendChild(ifr);
-      }
-    }
+    // Switching back to immersive: destroy slot iframe, restore original audio
+    slot.innerHTML = '';
     slot.classList.add('hidden');
+    _unmuteActivePlayer();
   }
 }
 
@@ -4938,21 +4954,11 @@ function closeLyricsModal() {
     const btn = id('tap-sync-btn');
     if (btn) { btn.textContent = '🎯 Sync'; btn.onclick = startTapSync; }
   }
-  // If in video mode, return iframe to its rightful home before hiding modal
+  // If in video mode, destroy the slot iframe and restore original player audio
   if (_lyricsViewMode === 'video') {
     const slot = id('lyrics-modal-video-slot');
-    const ifr = slot?.querySelector('iframe');
-    if (ifr) {
-      if (_miniPlayerMode === 'dj') {
-        const cont = id('dj-player-container');
-        if (cont) cont.appendChild(ifr); else id('mini-player-video')?.appendChild(ifr);
-      } else if (_miniPlayerMode === 'cat') {
-        const cont = id('cat-player-container');
-        if (cont && cont.children.length === 0) cont.appendChild(ifr);
-        else id('mini-player-video')?.appendChild(ifr);
-      }
-    }
-    if (slot) slot.classList.add('hidden');
+    if (slot) { slot.innerHTML = ''; slot.classList.add('hidden'); }
+    _unmuteActivePlayer();
   }
   // Reset slide transform so next open starts fresh
   const content = lyricsContentEl();
