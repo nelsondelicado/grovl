@@ -481,8 +481,23 @@ label { display: block; color: var(--text-dim); font-size: 0.8rem; margin-bottom
 .dj-lyrics-dot { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; animation: pulse 1s infinite; }
 /* Sync quality badge */
 .dj-lyrics-badge { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.70rem; font-weight: 600; letter-spacing: 0.03em; padding: 0.2rem 0.55rem; border-radius: 20px; margin-bottom: 0.75rem; }
-.dj-lyrics-badge--sync { background: rgba(16,185,129,0.12); color: #10b981; border: 1px solid rgba(16,185,129,0.25); }
-.dj-lyrics-badge--est  { background: rgba(245,158,11,0.12); color: #f59e0b; border: 1px solid rgba(245,158,11,0.25); }
+.dj-lyrics-badge--sync   { background: rgba(16,185,129,0.12); color: #10b981; border: 1px solid rgba(16,185,129,0.25); }
+.dj-lyrics-badge--est    { background: rgba(245,158,11,0.12); color: #f59e0b; border: 1px solid rgba(245,158,11,0.25); }
+.dj-lyrics-badge--custom { background: rgba(139,92,246,0.12); color: #8b5cf6; border: 1px solid rgba(139,92,246,0.25); }
+/* ── Tap Sync Mode ───────────────────────────────────────────────────── */
+.tap-sync-overlay { display:flex; flex-direction:column; height:100%; gap:0; }
+.tap-sync-lines { flex:1; overflow-y:auto; padding:1rem 1.5rem 0.5rem; }
+.tap-sync-line { padding:0.45rem 0.75rem; border-radius:0.5rem; font-size:1rem; color:var(--text-muted); transition:all 0.15s; cursor:default; }
+.tap-sync-line.done { color:var(--text-dim); text-decoration:line-through; opacity:0.4; }
+.tap-sync-line.active { background:rgba(139,92,246,0.15); color:var(--text); font-size:1.25rem; font-weight:700; border-left:3px solid #8b5cf6; }
+.tap-sync-line.next { color:var(--text-dim); opacity:0.7; }
+.tap-sync-footer { flex-shrink:0; padding:1rem 1.5rem 2rem; border-top:1px solid var(--border); background:var(--surface2); }
+.tap-sync-progress { font-size:0.75rem; color:var(--text-muted); margin-bottom:0.5rem; text-align:center; }
+.tap-sync-tap-btn { width:100%; padding:1.1rem; font-size:1.2rem; font-weight:700; background:#8b5cf6; color:white; border:none; border-radius:1rem; cursor:pointer; letter-spacing:0.04em; transition:transform 0.08s, background 0.1s; touch-action:manipulation; }
+.tap-sync-tap-btn:active { transform:scale(0.97); background:#7c3aed; }
+.tap-sync-actions { display:flex; gap:0.5rem; margin-top:0.6rem; }
+.tap-sync-actions button { flex:1; padding:0.5rem; font-size:0.8rem; border-radius:0.5rem; border:1px solid var(--border); background:var(--surface); color:var(--text-muted); cursor:pointer; font-family:inherit; }
+.tap-sync-actions button:hover { border-color:var(--accent); color:var(--text); }
 /* ── Lyrics Modal ─────────────────────────────────────────────────────── */
 .lyrics-modal {
   position: fixed; inset: 0; z-index: 9999;
@@ -1412,6 +1427,7 @@ let ytAccessToken = null;   // YouTube OAuth2 access token (PKCE flow)
 // ── STATE ────────────────────────────────────────────────────────
 const state = {
   settings: { token: '', username: '', ytApiKey: '', ytClientId: '', ytClientSecret: '', geniusToken: '' },
+  customLyrics: {},   // key: "artist|||title" → { lines:[{time,text}], savedAt }
   collection: [],
   wantlist: [],
   wantlistFetchedAt: null,  // ISO timestamp of last full wantlist fetch from Discogs
@@ -4119,6 +4135,210 @@ function _djExtractArtistTitle(track) {
 function lyricsContentEl() { return id('lyrics-modal-content'); }
 function lyricsScrollEl()  { return id('lyrics-modal-body'); }
 
+// Custom lyrics key — normalised "artist|||title"
+function _lyricsKey(artist, title) {
+  return `${(artist||'').toLowerCase().trim()}|||${(title||'').toLowerCase().trim()}`;
+}
+// Returns saved custom lyrics object or null
+function _getCustomLyrics(artist, title) {
+  return state.customLyrics?.[_lyricsKey(artist, title)] || null;
+}
+// Saves custom lyrics (lines array with {time,text}) for a track
+function _saveCustomLyrics(artist, title, lines) {
+  if (!state.customLyrics) state.customLyrics = {};
+  state.customLyrics[_lyricsKey(artist, title)] = {
+    lines, synced: true, source: 'tap-sync',
+    savedAt: new Date().toISOString().slice(0, 10)
+  };
+  save();
+}
+function _deleteCustomLyrics(artist, title) {
+  if (!state.customLyrics) return;
+  delete state.customLyrics[_lyricsKey(artist, title)];
+  save();
+}
+
+// ── Tap-to-sync ──────────────────────────────────────────────────────────────
+let _tapSyncState = null;  // null = inactive; object when syncing
+
+function _tapSafeHtml(str) {
+  return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _tapGetCurrentTime() {
+  if (_tapSyncState?.mode === 'cat') return (_catLastTime > 0 ? _catLastTime : 0);
+  return (_djLastTime > 0 ? _djLastTime : 0);
+}
+
+function startTapSync() {
+  // Determine mode & current track info
+  let mode, artist, title, lyricsText;
+
+  // Prefer DJ mode if a set is playing with lyrics
+  if (djCurrentSet && _djLyrics && !_djLyrics.instrumental) {
+    mode = 'dj';
+    const track = djCurrentSet.tracks?.[djCurrentIdx];
+    if (!track) return;
+    const ex = _djExtractArtistTitle(track);
+    artist = ex.artist; title = ex.title;
+    const lyr = _djLyrics;
+    if (lyr.plain)         lyricsText = lyr.plain;
+    else if (lyr.lines?.length) lyricsText = lyr.lines.map(l => l.text).filter(t => t?.trim()).join('\n');
+  } else if (_catCurrentTrack && _catLyrics && !_catLyrics.instrumental) {
+    mode = 'cat';
+    artist = _catCurrentTrack.artist || '';
+    title  = _catCurrentTrack.title  || '';
+    const lyr = _catLyrics;
+    if (lyr.plain)         lyricsText = lyr.plain;
+    else if (lyr.lines?.length) lyricsText = lyr.lines.map(l => l.text).filter(t => t?.trim()).join('\n');
+  }
+
+  if (!lyricsText) {
+    const c = id('lyrics-modal-content');
+    if (c) c.innerHTML = `<div class="dj-lyrics-status" style="opacity:0.6;flex-direction:column;gap:0.5rem;">
+      <div>⚠️ Sem letras para sincronizar.</div>
+      <div style="font-size:0.78rem;">Primeiro carrega as letras da faixa actual.</div>
+    </div>`;
+    return;
+  }
+
+  const lines = lyricsText.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return;
+
+  _tapSyncState = { mode, artist, title, lines, idx: 0, timed: [] };
+  // Swap the Sync button to Cancel while active
+  const btn = id('tap-sync-btn');
+  if (btn) { btn.textContent = '✕ Cancelar sync'; btn.onclick = cancelTapSync; }
+  document.addEventListener('keydown', _tapSyncKeyHandler);
+  _renderTapSync();
+}
+
+function _renderTapSync() {
+  const content = id('lyrics-modal-content');
+  if (!content || !_tapSyncState) return;
+
+  const { lines, idx } = _tapSyncState;
+  const total = lines.length;
+  const prev  = idx > 0 ? lines[idx - 1] : null;
+  const curr  = idx < total ? lines[idx]  : null;
+  const next  = idx < total - 1 ? lines[idx + 1] : null;
+  const pct   = Math.round((idx / total) * 100);
+
+  content.innerHTML = `
+    <div class="tap-sync-overlay">
+      <div style="padding:1rem 1.5rem 0.4rem;display:flex;justify-content:space-between;align-items:center;font-size:0.75rem;color:var(--text-muted);">
+        <span>🎯 Toca quando cada linha <em>começa</em></span>
+        <span>${idx} / ${total}</span>
+      </div>
+      <div style="height:3px;background:var(--surface2);margin:0 1.5rem 0;border-radius:2px;overflow:hidden;">
+        <div style="width:${pct}%;height:100%;background:#8b5cf6;transition:width 0.15s;border-radius:2px;"></div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1.5rem 2rem;gap:1.2rem;text-align:center;min-height:180px;">
+        ${prev ? `<div style="font-size:0.88rem;color:var(--text-muted);opacity:0.45;font-style:italic;max-width:85%;word-break:break-word;">${_tapSafeHtml(prev)}</div>` : `<div style="min-height:1.3em;"></div>`}
+        <div class="tap-sync-line active" style="padding:0.9rem 1.3rem;border-radius:0.75rem;max-width:90%;word-break:break-word;">
+          ${curr ? _tapSafeHtml(curr) : '<em style="opacity:0.4">Fim — a gravar…</em>'}
+        </div>
+        ${next ? `<div style="font-size:0.88rem;color:var(--text-muted);opacity:0.55;max-width:85%;word-break:break-word;">${_tapSafeHtml(next)}</div>` : `<div style="min-height:1.3em;"></div>`}
+      </div>
+      <div style="padding:0 1.5rem 1.5rem;display:flex;flex-direction:column;gap:0.6rem;">
+        <button class="tap-sync-tap-btn" onclick="tapSync()" ${!curr ? 'style="background:#4caf50;"' : ''}>
+          ${curr ? '⏎  TAP — ' + _tapSafeHtml(curr.length > 38 ? curr.slice(0,38)+'…' : curr) : '✓  Guardar sincronização'}
+        </button>
+        <div style="display:flex;gap:0.5rem;">
+          <button class="btn btn-ghost btn-sm" style="flex:1;" onclick="skipTapLine()" title="Saltar linha sem timestamp">⏭ Saltar</button>
+          ${idx > 0 ? `<button class="btn btn-ghost btn-sm" style="flex:1;" onclick="undoTapLine()">↩ Desfazer</button>` : ''}
+          <button class="btn btn-ghost btn-sm" style="flex:1;color:#e57373;" onclick="cancelTapSync()">✕</button>
+        </div>
+        <div style="font-size:0.72rem;color:var(--text-muted);text-align:center;opacity:0.55;">Espaço / Enter = TAP &nbsp;·&nbsp; → = Saltar &nbsp;·&nbsp; ← = Desfazer &nbsp;·&nbsp; Esc = Cancelar</div>
+      </div>
+    </div>`;
+}
+
+function tapSync() {
+  if (!_tapSyncState) return;
+  const { lines, idx } = _tapSyncState;
+  const t = _tapGetCurrentTime();
+  if (idx < lines.length) {
+    _tapSyncState.timed.push({ time: parseFloat(t.toFixed(2)), text: lines[idx] });
+    _tapSyncState.idx++;
+  }
+  if (_tapSyncState.idx >= lines.length) {
+    saveTapSync();
+  } else {
+    _renderTapSync();
+  }
+}
+
+function skipTapLine() {
+  if (!_tapSyncState) return;
+  _tapSyncState.idx++;
+  if (_tapSyncState.idx >= _tapSyncState.lines.length) {
+    saveTapSync();
+  } else {
+    _renderTapSync();
+  }
+}
+
+function undoTapLine() {
+  if (!_tapSyncState || _tapSyncState.idx === 0) return;
+  _tapSyncState.idx--;
+  _tapSyncState.timed.pop();
+  _renderTapSync();
+}
+
+function saveTapSync() {
+  if (!_tapSyncState) return;
+  const { artist, title, timed, mode } = _tapSyncState;
+  document.removeEventListener('keydown', _tapSyncKeyHandler);
+  _tapSyncState = null;
+  // Restore sync button
+  const btn = id('tap-sync-btn');
+  if (btn) { btn.textContent = '🎯 Sync'; btn.onclick = startTapSync; }
+
+  if (!timed.length) { cancelTapSync(); return; }
+  timed.sort((a, b) => a.time - b.time);
+  _saveCustomLyrics(artist, title, timed);
+
+  // Apply to active lyrics state and re-render
+  const saved = _getCustomLyrics(artist, title);
+  if (mode === 'dj') {
+    _djLyrics = { ...saved };
+    const c = id('lyrics-modal-content');
+    if (c) c.innerHTML = `<div class="dj-lyrics-status" style="flex-direction:column;gap:0.5rem;color:#8b5cf6;"><div style="font-size:2rem;">✓</div><div style="font-weight:600;">Guardado!</div><div style="font-size:0.8rem;opacity:0.7;">${timed.length} linhas sincronizadas</div></div>`;
+    setTimeout(() => renderDJLyricsPanel(), 1400);
+    if (_djLastTime > 0) setTimeout(() => updateDJLyricsLine(_djLastTime), 1450);
+  } else {
+    _catLyrics = { ...saved };
+    const c = id('lyrics-modal-content');
+    if (c) c.innerHTML = `<div class="dj-lyrics-status" style="flex-direction:column;gap:0.5rem;color:#8b5cf6;"><div style="font-size:2rem;">✓</div><div style="font-weight:600;">Guardado!</div><div style="font-size:0.8rem;opacity:0.7;">${timed.length} linhas sincronizadas</div></div>`;
+    setTimeout(() => renderCatLyricsPanel(), 1400);
+    if (_catLastTime > 0) setTimeout(() => updateCatLyricsLine(_catLastTime), 1450);
+  }
+}
+
+function cancelTapSync() {
+  document.removeEventListener('keydown', _tapSyncKeyHandler);
+  _tapSyncState = null;
+  const btn = id('tap-sync-btn');
+  if (btn) { btn.textContent = '🎯 Sync'; btn.onclick = startTapSync; }
+  // Restore normal lyrics view
+  if (djCurrentSet && _djLyrics) renderDJLyricsPanel();
+  else if (_catCurrentTrack && _catLyrics) renderCatLyricsPanel();
+}
+
+function _tapSyncKeyHandler(e) {
+  if (!_tapSyncState) { document.removeEventListener('keydown', _tapSyncKeyHandler); return; }
+  if (e.code === 'Space' || e.code === 'Enter') {
+    e.preventDefault(); tapSync();
+  } else if (e.code === 'ArrowRight') {
+    e.preventDefault(); skipTapLine();
+  } else if (e.code === 'ArrowLeft' || e.code === 'Backspace') {
+    e.preventDefault(); undoTapLine();
+  } else if (e.code === 'Escape') {
+    cancelTapSync();
+  }
+}
+
 function openLyricsModal(title, artist) {
   const modal = id('lyrics-modal');
   if (!modal) return;
@@ -4134,6 +4354,13 @@ function openLyricsModal(title, artist) {
 }
 
 function closeLyricsModal() {
+  // If tap-sync is active, cleanly cancel it first
+  if (_tapSyncState) {
+    document.removeEventListener('keydown', _tapSyncKeyHandler);
+    _tapSyncState = null;
+    const btn = id('tap-sync-btn');
+    if (btn) { btn.textContent = '🎯 Sync'; btn.onclick = startTapSync; }
+  }
   const modal = id('lyrics-modal');
   if (modal) modal.classList.add('hidden');
   document.body.style.overflow = '';
@@ -4352,6 +4579,14 @@ async function fetchDJLyrics(track) {
   content.innerHTML = `<div class="dj-lyrics-status"><div class="dj-lyrics-dot"></div>A procurar letras…</div>`;
 
   const { artist, title } = _djExtractArtistTitle(track);
+
+  // ── Priority 0: custom tap-synced lyrics (user's own timestamps) ──
+  const custom = _getCustomLyrics(artist, title);
+  if (custom) {
+    _djLyrics = { ...custom };
+    renderDJLyricsPanel(); return;
+  }
+
   // Wait briefly if duration not yet known (YouTube player may not have reported it yet)
   if (!_djTrackDuration) await new Promise(r => setTimeout(r, 800));
   const dur = Math.round(_djTrackDuration) || 0;
@@ -4394,10 +4629,13 @@ function renderDJLyricsPanel() {
     return;
   }
   if (_djLyrics.lines?.length) {
-    // Letras com timing (sincronizado real ou estimado) — badge de qualidade
-    const badge = _djLyrics.synced
-      ? `<div class="dj-lyrics-badge dj-lyrics-badge--sync">● Sincronizado</div>`
-      : `<div class="dj-lyrics-badge dj-lyrics-badge--est">◐ Timing estimado</div>`;
+    // Badge: custom tap-sync takes priority
+    const isCustom = _djLyrics.source === 'tap-sync';
+    const badge = isCustom
+      ? `<div class="dj-lyrics-badge dj-lyrics-badge--custom">🎯 Tap-sync &nbsp;<button class="btn btn-ghost btn-sm" style="font-size:0.7rem;padding:0.15rem 0.4rem;margin-left:0.3rem;" onclick="startTapSync()" title="Re-sincronizar">↺ re-sync</button></div>`
+      : _djLyrics.synced
+        ? `<div class="dj-lyrics-badge dj-lyrics-badge--sync">● Sincronizado</div>`
+        : `<div class="dj-lyrics-badge dj-lyrics-badge--est">◐ Timing estimado</div>`;
     content.innerHTML = badge + _djLyrics.lines.map((l, i) =>
       `<div class="dj-lyric-line" id="dj-ll-${i}" data-t="${l.time}">${esc(l.text)}</div>`
     ).join('');
@@ -4489,6 +4727,14 @@ async function fetchCatLyrics(artist, title) {
   _catLyrics = null; _catLyricsLine = -1;
   const content = lyricsContentEl();
   if (!content) return;
+
+  // ── Priority 0: custom tap-synced lyrics ──
+  const custom = _getCustomLyrics(artist, title);
+  if (custom) {
+    _catLyrics = { ...custom };
+    renderCatLyricsPanel(); return;
+  }
+
   content.innerHTML = `<div class="dj-lyrics-status"><div class="dj-lyrics-dot"></div>A procurar letras…</div>`;
 
   // Wait briefly if duration not yet known
@@ -4525,9 +4771,12 @@ function renderCatLyricsPanel() {
     content.innerHTML = `<div class="dj-lyrics-status" style="opacity:0.5;">🎹 Instrumental</div>`; return;
   }
   if (_catLyrics.lines?.length) {
-    const badge = _catLyrics.synced
-      ? `<div class="dj-lyrics-badge dj-lyrics-badge--sync">● Sincronizado</div>`
-      : `<div class="dj-lyrics-badge dj-lyrics-badge--est">◐ Timing estimado</div>`;
+    const isCustom = _catLyrics.source === 'tap-sync';
+    const badge = isCustom
+      ? `<div class="dj-lyrics-badge dj-lyrics-badge--custom">🎯 Tap-sync &nbsp;<button class="btn btn-ghost btn-sm" style="font-size:0.7rem;padding:0.15rem 0.4rem;margin-left:0.3rem;" onclick="startTapSync()" title="Re-sincronizar">↺ re-sync</button></div>`
+      : _catLyrics.synced
+        ? `<div class="dj-lyrics-badge dj-lyrics-badge--sync">● Sincronizado</div>`
+        : `<div class="dj-lyrics-badge dj-lyrics-badge--est">◐ Timing estimado</div>`;
     content.innerHTML = badge + _catLyrics.lines.map((l, i) =>
       `<div class="dj-lyric-line" id="cat-ll-${i}" data-t="${l.time}">${esc(l.text)}</div>`
     ).join('');
@@ -5401,6 +5650,7 @@ function updateDJSavedCount() {
         <span id="lyrics-modal-artist" class="lyrics-modal-track-artist"></span>
       </div>
       <div class="lyrics-modal-controls">
+        <button id="tap-sync-btn" class="btn btn-ghost btn-sm" onclick="startTapSync()" title="Sincronizar letras por tap" style="font-size:0.78rem;padding:0.35rem 0.6rem;">🎯 Sync</button>
         <button class="btn btn-ghost btn-sm lyrics-modal-close-btn" onclick="closeLyricsModal()" title="Fechar letras">✕</button>
       </div>
     </div>
