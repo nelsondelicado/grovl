@@ -538,6 +538,15 @@ body.has-mini-player { padding-bottom: 54px; }
 .mode-immersive .dj-lyrics-badge { align-self:center; }
 /* ── Video mode ──────────────────────────────────────────────────────── */
 .mode-video .lyrics-modal-body { padding:1.2rem 1.5rem 7rem; }
+/* ── Alt-video picker ────────────────────────────────────────────────── */
+.alt-video-picker { display:flex; flex-direction:column; gap:0.5rem; padding:1rem 1.2rem; }
+.alt-video-item { display:flex; align-items:center; gap:0.7rem; padding:0.55rem 0.7rem; border-radius:0.55rem; border:1px solid var(--border); cursor:pointer; transition:background 0.15s; }
+.alt-video-item:hover { background:var(--surface); }
+.alt-video-item img { width:80px; height:45px; object-fit:cover; border-radius:0.3rem; flex-shrink:0; }
+.alt-video-item-info { flex:1; min-width:0; }
+.alt-video-item-title { font-size:0.82rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.alt-video-item-ch { font-size:0.72rem; color:var(--text-muted); margin-top:0.1rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.alt-video-item-duration { font-size:0.72rem; color:var(--text-muted); flex-shrink:0; }
 /* ── Lyrics Modal ─────────────────────────────────────────────────────── */
 .lyrics-modal {
   position: fixed; inset: 0; z-index: 9999;
@@ -557,6 +566,10 @@ body.has-mini-player { padding-bottom: 54px; }
   display: flex; flex-direction: column; overflow: hidden;
   box-shadow: 0 -16px 64px rgba(0,0,0,0.6);
   animation: lyricsSlideUp 0.32s cubic-bezier(0.34, 1.25, 0.64, 1);
+}
+.mode-video.lyrics-modal-sheet {
+  height: 97vh;
+  border-radius: 0.8rem 0.8rem 0 0;
 }
 @keyframes lyricsSlideUp {
   from { transform: translateY(64px); opacity: 0; }
@@ -4351,6 +4364,19 @@ function _djExtractArtistTitle(track) {
 function lyricsContentEl() { return id('lyrics-modal-content'); }
 function lyricsScrollEl()  { return id('lyrics-modal-body'); }
 
+// Scroll the active lyric line into view.
+// In video mode: anchor near the TOP of the scroll area (line stays just below the video).
+// In immersive mode: center the line vertically.
+function _scrollLyricsTo(curEl) {
+  const panel = lyricsScrollEl();
+  if (!curEl || !panel) return;
+  if (_lyricsViewMode === 'video') {
+    panel.scrollTop = curEl.offsetTop - 24;
+  } else {
+    panel.scrollTop = curEl.offsetTop - panel.clientHeight / 2 + curEl.clientHeight / 2;
+  }
+}
+
 // Custom lyrics key — normalised "artist|||title"
 function _lyricsKey(artist, title) {
   return `${(artist||'').toLowerCase().trim()}|||${(title||'').toLowerCase().trim()}`;
@@ -4655,8 +4681,150 @@ function miniPlayerLyrics() {
   else if (_miniPlayerMode === 'cat') toggleCatLyrics();
 }
 
+// ── Alternative video search ───────────────────────────────────────────────────
+// Searches YouTube for up to 5 alternatives for the current track.
+// If no YT API key: opens YouTube search in a new tab.
+async function searchAltVideo() {
+  const btn = id('alt-video-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+
+  // Determine current track info
+  let artist = '', title = '', mode = _miniPlayerMode;
+  if (mode === 'cat' && _catCurrentTrack) {
+    artist = _catCurrentTrack.artist || '';
+    title  = _catCurrentTrack.title  || '';
+  } else if (mode === 'dj' && djCurrentSet) {
+    artist = djCurrentSet.artist || '';
+    title  = djCurrentSet.tracks?.[djCurrentIdx]?.title || djCurrentSet.tracks?.[djCurrentIdx]?.channel || '';
+  }
+
+  if (!artist && !title) {
+    if (btn) { btn.disabled = false; btn.textContent = '🔍 Vídeo'; }
+    toast('Nenhuma faixa em curso', 'error'); return;
+  }
+
+  // No API key → open YouTube search tab as fallback
+  if (!state.settings.ytApiKey) {
+    window.open(`https://www.youtube.com/results?search_query=${encodeURIComponent(artist + ' ' + title + ' official audio')}`, '_blank');
+    if (btn) { btn.disabled = false; btn.textContent = '🔍 Vídeo'; }
+    return;
+  }
+
+  try {
+    const key   = state.settings.ytApiKey;
+    const query = `${artist} ${title}`;
+    const url   = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=5&key=${encodeURIComponent(key)}`;
+    const r     = await fetch(url);
+    const d     = await r.json();
+    if (d.error) throw new Error(d.error.message);
+
+    const items = (d.items || []).filter(i => i.id?.videoId);
+    if (!items.length) { toast('Sem resultados no YouTube', 'error'); return; }
+
+    // Fetch video durations (requires videos endpoint)
+    const ids = items.map(i => i.id.videoId).join(',');
+    let durMap = {};
+    try {
+      const vr = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id=${ids}&key=${encodeURIComponent(key)}`);
+      const vd = await vr.json();
+      (vd.items || []).forEach(v => {
+        const m = (v.contentDetails?.duration || '').match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+        if (m) {
+          const h = parseInt(m[1]||0), mn = parseInt(m[2]||0), s = parseInt(m[3]||0);
+          durMap[v.id] = h ? `${h}:${String(mn).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${mn}:${String(s).padStart(2,'0')}`;
+        }
+      });
+    } catch(_) {}
+
+    // Build picker inside the lyrics modal body
+    const content = id('lyrics-modal-content');
+    if (!content) return;
+
+    const heading = `<div style="font-size:0.8rem;font-weight:700;color:var(--text-muted);margin-bottom:0.4rem;padding:0 0.2rem;">
+      Escolhe um vídeo para <em>${esc(artist)} — ${esc(title)}</em>
+      <button onclick="_closeAltVideoPicker()" style="float:right;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:1rem;">✕</button>
+    </div>`;
+
+    const rows = items.map(item => {
+      const vid  = item.id.videoId;
+      const vtit = esc(item.snippet?.title || '');
+      const vch  = esc(item.snippet?.channelTitle || '');
+      const thumb = `https://img.youtube.com/vi/${vid}/mqdefault.jpg`;
+      const dur  = esc(durMap[vid] || '');
+      return `<div class="alt-video-item" onclick="pickAltVideo('${vid}')">
+        <img src="${thumb}" alt="" loading="lazy">
+        <div class="alt-video-item-info">
+          <div class="alt-video-item-title">${vtit}</div>
+          <div class="alt-video-item-ch">${vch}</div>
+        </div>
+        ${dur ? `<div class="alt-video-item-duration">${dur}</div>` : ''}
+      </div>`;
+    }).join('');
+
+    content.innerHTML = `<div class="alt-video-picker">${heading}${rows}</div>`;
+    // Store context so pickAltVideo knows what to update
+    content.dataset.altArtist = artist;
+    content.dataset.altTitle  = title;
+    content.dataset.altMode   = mode;
+
+  } catch(e) {
+    toast('Erro YouTube: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔍 Vídeo'; }
+  }
+}
+
+function _closeAltVideoPicker() {
+  // Re-render the lyrics that were showing before
+  if (_miniPlayerMode === 'dj' && _djLyrics) renderDJLyricsPanel();
+  else if (_miniPlayerMode === 'cat' && _catLyrics) renderCatLyricsPanel();
+  else {
+    const c = id('lyrics-modal-content');
+    if (c) c.innerHTML = '';
+  }
+}
+
+function pickAltVideo(videoId) {
+  const content = id('lyrics-modal-content');
+  const artist  = content?.dataset.altArtist || '';
+  const title   = content?.dataset.altTitle  || '';
+  const mode    = content?.dataset.altMode   || _miniPlayerMode;
+
+  if (mode === 'cat') {
+    // Update stored ytVideoId in the collection record
+    const rec = state.collection.find(r =>
+      (r.artist || '').toLowerCase() === artist.toLowerCase()
+    );
+    if (rec) {
+      const track = (rec.tracklist || []).find(t =>
+        (t.title || '').toLowerCase() === title.toLowerCase()
+      );
+      if (track) { track.ytVideoId = videoId; save(); }
+    }
+    // Restart the player with the new video (lyrics modal stays open)
+    _catShowLyrics = true; // keep modal open after playDetailTrack
+    playDetailTrack(videoId, artist, title);
+
+  } else if (mode === 'dj') {
+    // Update stored videoId in the DJ set track
+    const track = djCurrentSet?.tracks?.[djCurrentIdx];
+    if (track) { track.videoId = videoId; save(); }
+    // Swap the iframe src — DOM node stays in whatever slot it's in
+    const ifr = document.querySelector('#dj-player-container iframe, #mini-player-video iframe, #lyrics-modal-video-slot iframe');
+    if (ifr) {
+      const origin = location.protocol === 'https:' ? location.origin : 'https://www.youtube.com';
+      ifr.src = `https://www.youtube.com/embed/${videoId}?enablejsapi=1&autoplay=1&origin=${encodeURIComponent(origin)}&rel=0&modestbranding=1`;
+    }
+    // Re-open lyrics for new track
+    _djShowLyrics = true;
+    openLyricsModal(title, artist);
+    fetchDJLyrics(djCurrentSet.tracks[djCurrentIdx]);
+  }
+  toast('Vídeo atualizado ✓', 'success');
+}
+
 // ── Karaoke view mode ─────────────────────────────────────────────────────────
-let _lyricsViewMode = 'immersive'; // 'immersive' | 'video'
+let _lyricsViewMode = 'video'; // 'immersive' | 'video'
 
 function setLyricsMode(mode) {
   _lyricsViewMode = mode;
@@ -5234,9 +5402,7 @@ function updateCatLyricsLine(currentTime) {
     if (i === idx)                          el.classList.add('dj-lyric-current');
     else if (i >= idx - 1 && i <= idx + 2) el.classList.add('dj-lyric-near');
   });
-  const cur   = id(`cat-ll-${idx}`);
-  const panel = lyricsScrollEl();
-  if (cur && panel) panel.scrollTop = cur.offsetTop - panel.clientHeight / 2 + cur.clientHeight / 2;
+  _scrollLyricsTo(id(`cat-ll-${idx}`));
 }
 
 function updateCatLyricsPlain(currentTime) {
@@ -5255,9 +5421,7 @@ function updateCatLyricsPlain(currentTime) {
     if (i === idx)                          { el.classList.add('dj-lyric-current'); el.style.setProperty('--kp', '100%'); }
     else if (i >= idx - 1 && i <= idx + 2) { el.classList.add('dj-lyric-near'); }
   });
-  const cur = allLines[idx];
-  const panel = lyricsScrollEl();
-  if (cur && panel) panel.scrollTop = cur.offsetTop - panel.clientHeight / 2 + cur.clientHeight / 2;
+  _scrollLyricsTo(allLines[idx]);
 }
 
 // ── DJ plain lyrics (unsynced fallback) ──────────────────────────────────────
@@ -5282,12 +5446,7 @@ function updateDJLyricsPlain(currentTime) {
       el.classList.add('dj-lyric-near');
     }
   });
-  const cur = allLines[idx];
-  const panel = lyricsScrollEl();
-  if (cur && panel) {
-    const panelMid = panel.clientHeight / 2;
-    panel.scrollTop = cur.offsetTop - panelMid + cur.clientHeight / 2;
-  }
+  _scrollLyricsTo(allLines[idx]);
 }
 
 function updateDJLyricsLine(currentTime) {
@@ -5329,11 +5488,7 @@ function updateDJLyricsLine(currentTime) {
 
   // Scroll current line into view (centred in the panel)
   const cur   = id(`dj-ll-${idx}`);
-  const panel = lyricsScrollEl();
-  if (cur && panel) {
-    const panelMid = panel.clientHeight / 2;
-    panel.scrollTop = cur.offsetTop - panelMid + cur.clientHeight / 2;
-  }
+  _scrollLyricsTo(cur);
 }
 
 function toggleDJLyrics() {
@@ -6077,9 +6232,10 @@ function updateDJSavedCount() {
       </div>
       <div class="lyrics-modal-controls">
         <div class="lyrics-mode-toggle" id="lyrics-mode-toggle">
-          <button class="lyrics-mode-btn lm-active" id="lm-btn-immersive" onclick="setLyricsMode('immersive')" title="Modo imersivo">🎵</button>
-          <button class="lyrics-mode-btn" id="lm-btn-video" onclick="setLyricsMode('video')" title="Modo vídeo">📺</button>
+          <button class="lyrics-mode-btn" id="lm-btn-immersive" onclick="setLyricsMode('immersive')" title="Modo imersivo">🎵</button>
+          <button class="lyrics-mode-btn lm-active" id="lm-btn-video" onclick="setLyricsMode('video')" title="Modo vídeo">📺</button>
         </div>
+        <button id="alt-video-btn" class="btn btn-ghost btn-sm" onclick="searchAltVideo()" title="Procurar outro vídeo" style="font-size:0.78rem;padding:0.35rem 0.6rem;">🔍 Vídeo</button>
         <button id="tap-sync-btn" class="btn btn-ghost btn-sm" onclick="startTapSync()" title="Sincronizar letras por tap" style="font-size:0.78rem;padding:0.35rem 0.6rem;">🎯 Sync</button>
         <button class="btn btn-ghost btn-sm lyrics-modal-close-btn" onclick="closeLyricsModal()" title="Fechar letras">✕</button>
       </div>
