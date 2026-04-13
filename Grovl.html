@@ -542,7 +542,17 @@ body.has-mini-player { padding-bottom: 54px; }
 .mode-immersive .dj-lyric-line.active { font-size:1.7rem !important; font-weight:800 !important; color:var(--accent) !important; text-shadow:0 0 40px rgba(232,94,5,0.5); padding:0.8rem 1.5rem; letter-spacing:0.01em; }
 .mode-immersive .dj-lyrics-badge { align-self:center; }
 /* ── Video mode ──────────────────────────────────────────────────────── */
-.mode-video .lyrics-modal-body { padding:1.2rem 1.5rem 7rem; }
+/* The lyrics body is a fixed window below the video — no scrolling.
+   The content slides up via transform so there's zero jump. */
+.mode-video .lyrics-modal-body {
+  overflow: hidden;          /* clip instead of scroll */
+  padding: 1rem 2rem 0;
+}
+.mode-video #lyrics-modal-content {
+  transition: transform 0.38s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  will-change: transform;
+  padding-bottom: 5rem;      /* breathing room at the bottom */
+}
 /* ── Alt-video picker ────────────────────────────────────────────────── */
 .alt-video-picker { display:flex; flex-direction:column; gap:0.5rem; padding:1rem 1.2rem; }
 .alt-video-item { display:flex; align-items:center; gap:0.7rem; padding:0.55rem 0.7rem; border-radius:0.55rem; border:1px solid var(--border); cursor:pointer; transition:background 0.15s; }
@@ -4371,18 +4381,28 @@ function lyricsContentEl() { return id('lyrics-modal-content'); }
 function lyricsScrollEl()  { return id('lyrics-modal-body'); }
 
 // Scroll the active lyric line into view.
-// Now that .lyrics-modal-body has position:relative, cur.offsetTop is relative to the
-// scroll container itself — so the maths are straightforward.
-// In video mode: anchor near the TOP of the lyrics area (line visible right below the video).
-// In immersive mode: center the line vertically in the panel.
+//
+// VIDEO MODE:  the lyrics-modal-body has overflow:hidden — no browser scroll.
+//   We slide #lyrics-modal-content UP via transform:translateY so the active
+//   line appears at the top of the fixed lyrics window. No jump, smooth slide.
+//
+// IMMERSIVE MODE: normal overflow-y:auto scroll, line centred in the panel.
+//
+// .lyrics-modal-body has position:relative so cur.offsetTop is relative to
+// the scroll container (not the whole modal sheet).
 function _scrollLyricsTo(curEl) {
-  const panel = lyricsScrollEl();
+  const panel   = lyricsScrollEl();
+  const content = lyricsContentEl();
   if (!curEl || !panel) return;
+
   if (_lyricsViewMode === 'video') {
-    // Place active line 20px from the top of the visible lyrics area
-    panel.scrollTop = curEl.offsetTop - 20;
+    // Slide content up so active line is 16px from the top of the lyrics window.
+    // Clamp at 0 so the very first lines don't push content below its start.
+    const ty = Math.min(0, -(curEl.offsetTop - 16));
+    if (content) content.style.transform = `translateY(${ty}px)`;
   } else {
-    // Centre the active line in the panel
+    // Immersive: plain scroll, line centred
+    if (content) content.style.transform = '';
     panel.scrollTop = curEl.offsetTop - (panel.clientHeight / 2) + (curEl.clientHeight / 2);
   }
 }
@@ -4849,6 +4869,12 @@ function setLyricsMode(mode) {
   if (bi) bi.classList.toggle('lm-active', mode === 'immersive');
   if (bv) bv.classList.toggle('lm-active', mode === 'video');
 
+  // Reset slide transform and scroll when switching modes
+  const content = lyricsContentEl();
+  const panel   = lyricsScrollEl();
+  if (content) content.style.transform = '';
+  if (panel)   panel.scrollTop = 0;
+
   // Manage video slot visibility and iframe migration
   const slot = id('lyrics-modal-video-slot');
   if (!slot) return;
@@ -4920,6 +4946,12 @@ function closeLyricsModal() {
     }
     if (slot) slot.classList.add('hidden');
   }
+  // Reset slide transform so next open starts fresh
+  const content = lyricsContentEl();
+  const panel   = lyricsScrollEl();
+  if (content) content.style.transform = '';
+  if (panel)   panel.scrollTop = 0;
+
   const modal = id('lyrics-modal');
   if (modal) modal.classList.add('hidden');
   document.body.style.overflow = '';
