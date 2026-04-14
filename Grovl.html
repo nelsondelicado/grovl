@@ -4892,7 +4892,7 @@ function setLyricsMode(mode) {
   if (!slot) return;
 
   if (mode === 'video') {
-    // Get the current videoId and playback position from state
+    // Get current videoId + timestamp from whichever player is active
     let videoId = null, startSec = 0;
     if (_miniPlayerMode === 'cat' && _catCurrentTrack) {
       videoId  = _catCurrentTrack.videoId;
@@ -4904,12 +4904,12 @@ function setLyricsMode(mode) {
 
     if (videoId) {
       slot.classList.remove('hidden');
-      // Create a fresh iframe in the slot at the correct timestamp.
-      // This is more reliable than DOM migration (no race conditions).
+      // Create a MUTED mirror iframe in the slot.
+      // The original player keeps its audio — no double-audio / autoplay conflict.
       const origin = (location.protocol === 'https:' || location.protocol === 'http:')
         ? location.origin : 'https://www.youtube.com';
       const params = [
-        'enablejsapi=1', 'autoplay=1', 'rel=0', 'modestbranding=1',
+        'autoplay=1', 'mute=1', 'rel=0', 'modestbranding=1', 'controls=0',
         `start=${startSec}`,
         `origin=${encodeURIComponent(origin)}`
       ].join('&');
@@ -4917,16 +4917,13 @@ function setLyricsMode(mode) {
         src="https://www.youtube.com/embed/${videoId}?${params}"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
         allowfullscreen style="width:100%;height:100%;border:none;display:block;"></iframe>`;
-      // Mute the original player so there's no double audio
-      _muteActivePlayer();
     } else {
       slot.classList.add('hidden');
     }
   } else {
-    // Switching back to immersive: destroy slot iframe, restore original audio
+    // Immersive mode: destroy slot iframe
     slot.innerHTML = '';
     slot.classList.add('hidden');
-    _unmuteActivePlayer();
   }
 }
 
