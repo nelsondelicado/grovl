@@ -4642,16 +4642,23 @@ function _migrateIframeToView() {
   }
 }
 
-// ── Mute / unmute the background player so the karaoke slot has no audio echo ──
+// ── Mute / unmute the background player when karaoke slot takes over audio ────
+// Retries several times so the postMessage lands even if the iframe is still loading.
 function _muteActivePlayer() {
-  const ifr = _miniPlayerMode === 'dj' ? id('dj-yt-iframe') : id('cat-yt-iframe');
-  if (!ifr) return;
-  try { ifr.contentWindow.postMessage(JSON.stringify({event:'command',func:'mute',args:[]}), 'https://www.youtube.com'); } catch(_) {}
+  const _send = () => {
+    const ifr = _miniPlayerMode === 'dj' ? id('dj-yt-iframe') : id('cat-yt-iframe');
+    if (!ifr) return;
+    try { ifr.contentWindow.postMessage(JSON.stringify({event:'command',func:'mute',args:[]}), 'https://www.youtube.com'); } catch(_) {}
+  };
+  _send(); setTimeout(_send, 400); setTimeout(_send, 1000);
 }
 function _unmuteActivePlayer() {
-  const ifr = _miniPlayerMode === 'dj' ? id('dj-yt-iframe') : id('cat-yt-iframe');
-  if (!ifr) return;
-  try { ifr.contentWindow.postMessage(JSON.stringify({event:'command',func:'unMute',args:[]}), 'https://www.youtube.com'); } catch(_) {}
+  const _send = () => {
+    const ifr = _miniPlayerMode === 'dj' ? id('dj-yt-iframe') : id('cat-yt-iframe');
+    if (!ifr) return;
+    try { ifr.contentWindow.postMessage(JSON.stringify({event:'command',func:'unMute',args:[]}), 'https://www.youtube.com'); } catch(_) {}
+  };
+  _send(); setTimeout(_send, 300);
 }
 
 // ── Kill helpers (stops audio, removes iframe from DOM) ───────────────────────
@@ -4867,8 +4874,12 @@ function pickAltVideo(videoId) {
 
 // ── Karaoke view mode ─────────────────────────────────────────────────────────
 let _lyricsViewMode = 'video'; // 'immersive' | 'video'
+let _karaokeUnmuteTimer = null; // pending timer to unmute slot after main player is silenced
 
 function setLyricsMode(mode) {
+  // Cancel any pending slot-unmute timer from a previous call
+  if (_karaokeUnmuteTimer) { clearTimeout(_karaokeUnmuteTimer); _karaokeUnmuteTimer = null; }
+
   _lyricsViewMode = mode;
   const sheet = document.querySelector('.lyrics-modal-sheet');
   if (sheet) {
@@ -4904,12 +4915,14 @@ function setLyricsMode(mode) {
 
     if (videoId) {
       slot.classList.remove('hidden');
-      // Create a MUTED mirror iframe in the slot.
-      // The original player keeps its audio — no double-audio / autoplay conflict.
+      // Strategy: slot starts MUTED so Chrome can't block it (muted autoplay is unconditional).
+      // We immediately mute the main player and, after it has had time to go silent,
+      // unmute the slot — giving it audio with full controls. Net result: no double audio.
       const origin = (location.protocol === 'https:' || location.protocol === 'http:')
         ? location.origin : 'https://www.youtube.com';
       const params = [
-        'autoplay=1', 'mute=1', 'rel=0', 'modestbranding=1', 'controls=0',
+        'enablejsapi=1', 'autoplay=1', 'mute=1',
+        'controls=1', 'rel=0', 'modestbranding=1',
         `start=${startSec}`,
         `origin=${encodeURIComponent(origin)}`
       ].join('&');
@@ -4917,13 +4930,30 @@ function setLyricsMode(mode) {
         src="https://www.youtube.com/embed/${videoId}?${params}"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
         allowfullscreen style="width:100%;height:100%;border:none;display:block;"></iframe>`;
+      // Silence the main player
+      _muteActivePlayer();
+      // After main player has muted, unmute the slot so it becomes the audio source
+      _karaokeUnmuteTimer = setTimeout(() => {
+        _karaokeUnmuteTimer = null;
+        const modal   = id('lyrics-modal');
+        const slotIfr = document.querySelector('#lyrics-modal-video-slot iframe');
+        if (slotIfr && modal && !modal.classList.contains('hidden')) {
+          try {
+            slotIfr.contentWindow.postMessage(
+              JSON.stringify({event:'command', func:'unMute', args:[]}),
+              'https://www.youtube.com'
+            );
+          } catch(_) {}
+        }
+      }, 450);
     } else {
       slot.classList.add('hidden');
     }
   } else {
-    // Immersive mode: destroy slot iframe
+    // Immersive mode: destroy slot iframe and restore main player audio
     slot.innerHTML = '';
     slot.classList.add('hidden');
+    _unmuteActivePlayer();
   }
 }
 
@@ -4944,6 +4974,8 @@ function openLyricsModal(title, artist) {
 }
 
 function closeLyricsModal() {
+  // Cancel any pending slot-unmute timer
+  if (_karaokeUnmuteTimer) { clearTimeout(_karaokeUnmuteTimer); _karaokeUnmuteTimer = null; }
   // If tap-sync is active, cleanly cancel it first
   if (_tapSyncState) {
     document.removeEventListener('keydown', _tapSyncKeyHandler);
@@ -4951,12 +4983,10 @@ function closeLyricsModal() {
     const btn = id('tap-sync-btn');
     if (btn) { btn.textContent = '🎯 Sync'; btn.onclick = startTapSync; }
   }
-  // If in video mode, destroy the slot iframe and restore original player audio
-  if (_lyricsViewMode === 'video') {
-    const slot = id('lyrics-modal-video-slot');
-    if (slot) { slot.innerHTML = ''; slot.classList.add('hidden'); }
-    _unmuteActivePlayer();
-  }
+  // Destroy slot iframe and restore original player audio
+  const slot = id('lyrics-modal-video-slot');
+  if (slot) { slot.innerHTML = ''; slot.classList.add('hidden'); }
+  _unmuteActivePlayer();
   // Reset slide transform so next open starts fresh
   const content = lyricsContentEl();
   const panel   = lyricsScrollEl();
