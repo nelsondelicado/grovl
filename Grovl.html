@@ -4190,11 +4190,19 @@ function ensureDJPostMessageListener() {
   window.addEventListener('message', function(e) {
     if (e.origin !== 'https://www.youtube.com') return;
     // Identify which iframe sent the message
-    const djIframe  = id('dj-yt-iframe');
-    const catIframe = id('cat-yt-iframe');
-    const fromDJ    = djIframe  && e.source === djIframe.contentWindow;
-    const fromCat   = catIframe && e.source === catIframe.contentWindow;
-    if (!fromDJ && !fromCat) return;
+    const djIframe   = id('dj-yt-iframe');
+    const catIframe  = id('cat-yt-iframe');
+    const slotIframe = id('lyrics-slot-iframe');
+    const fromDJ    = djIframe   && e.source === djIframe.contentWindow;
+    const fromCat   = catIframe  && e.source === catIframe.contentWindow;
+    const fromSlot  = slotIframe && e.source === slotIframe.contentWindow;
+    if (!fromDJ && !fromCat && !fromSlot) return;
+    // While the modal slot is active, it is the single source of truth for
+    // karaoke sync — infoDelivery from the (paused) background player must
+    // be ignored to prevent time drift.
+    const modalEl    = id('lyrics-modal');
+    const slotActive = !!slotIframe && _lyricsViewMode === 'video'
+                       && modalEl && !modalEl.classList.contains('hidden');
     try {
       const msg = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
       if (!msg || !msg.event) return;
@@ -4204,6 +4212,8 @@ function ensureDJPostMessageListener() {
         if (msg.event === 'onError') { djPlayerError({ data: msg.info }); return; }
         if (msg.event === 'onStateChange' && msg.info === 0) { _djTriggerEnd(); return; }
         if (msg.event === 'infoDelivery' && msg.info && typeof msg.info === 'object') {
+          // Slot is the authoritative clock while modal is open in video mode
+          if (slotActive && _miniPlayerMode === 'dj') return;
           const cur = msg.info.currentTime;
           const dur = msg.info.progressState?.duration || msg.info.duration;
           if (cur != null) _djLastTime = cur;
@@ -4227,6 +4237,8 @@ function ensureDJPostMessageListener() {
       // ── Catalogue player events ───────────────────────────────────────────
       if (fromCat) {
         if (msg.event === 'infoDelivery' && msg.info && typeof msg.info === 'object') {
+          // Slot is the authoritative clock while modal is open in video mode
+          if (slotActive && _miniPlayerMode === 'cat') return;
           const cur = msg.info.currentTime;
           const dur = msg.info.progressState?.duration || msg.info.duration;
           if (cur != null) _catLastTime = cur;
@@ -4239,6 +4251,37 @@ function ensureDJPostMessageListener() {
           if (dur > 10 && _catLyrics && !_catLyrics.synced && !_catLyrics.lines?.length && _catLyrics.plain) {
             const timed = _plainToTimed(_catLyrics.plain, dur);
             if (timed) { _catLyrics = { lines: timed, synced: false }; renderCatLyricsPanel(); }
+          }
+        }
+      }
+
+      // ── Modal slot events (authoritative clock while modal is open) ───────
+      if (fromSlot) {
+        if (msg.event === 'infoDelivery' && msg.info && typeof msg.info === 'object') {
+          const cur = msg.info.currentTime;
+          const dur = msg.info.progressState?.duration || msg.info.duration;
+          if (_miniPlayerMode === 'cat') {
+            if (cur != null) _catLastTime = cur;
+            if (dur  > 5)    _catTrackDuration = dur;
+            if (_catShowLyrics) {
+              if (_catLyrics?.lines?.length) updateCatLyricsLine(_catLastTime);
+              else if (_catLyrics?.plain)    updateCatLyricsPlain(_catLastTime);
+            }
+            if (dur > 10 && _catLyrics && !_catLyrics.synced && !_catLyrics.lines?.length && _catLyrics.plain) {
+              const timed = _plainToTimed(_catLyrics.plain, dur);
+              if (timed) { _catLyrics = { lines: timed, synced: false }; renderCatLyricsPanel(); }
+            }
+          } else if (_miniPlayerMode === 'dj') {
+            if (cur != null) _djLastTime = cur;
+            if (dur  > 5)    _djTrackDuration = dur;
+            if (_djShowLyrics) {
+              if (_djLyrics?.lines?.length) updateDJLyricsLine(_djLastTime);
+              else if (_djLyrics?.plain)    updateDJLyricsPlain(_djLastTime);
+            }
+            if (dur > 10 && _djLyrics && !_djLyrics.synced && !_djLyrics.lines?.length && _djLyrics.plain) {
+              const timed = _plainToTimed(_djLyrics.plain, dur);
+              if (timed) { _djLyrics = { lines: timed, synced: false }; renderDJLyricsPanel(); }
+            }
           }
         }
       }
@@ -4661,6 +4704,34 @@ function _unmuteActivePlayer() {
   _send(); setTimeout(_send, 300);
 }
 
+// ── Pause / resume the background player so the modal slot can be the sole ────
+// audio+time source while karaoke "video" mode is active. Prevents the ghost
+// player from drifting ahead of what the user actually hears.
+function _pauseActivePlayer() {
+  const _send = () => {
+    const ifr = _miniPlayerMode === 'dj' ? id('dj-yt-iframe') : id('cat-yt-iframe');
+    if (!ifr) return;
+    try {
+      ifr.contentWindow.postMessage(JSON.stringify({event:'command',func:'pauseVideo',args:[]}), 'https://www.youtube.com');
+      ifr.contentWindow.postMessage(JSON.stringify({event:'command',func:'mute',args:[]}),       'https://www.youtube.com');
+    } catch(_) {}
+  };
+  _send(); setTimeout(_send, 300); setTimeout(_send, 900);
+}
+function _resumeActivePlayer(seekSec) {
+  const t = Math.max(0, Math.floor(Number(seekSec) || 0));
+  const _send = () => {
+    const ifr = _miniPlayerMode === 'dj' ? id('dj-yt-iframe') : id('cat-yt-iframe');
+    if (!ifr) return;
+    try {
+      ifr.contentWindow.postMessage(JSON.stringify({event:'command',func:'seekTo',args:[t,true]}),  'https://www.youtube.com');
+      ifr.contentWindow.postMessage(JSON.stringify({event:'command',func:'unMute',args:[]}),         'https://www.youtube.com');
+      ifr.contentWindow.postMessage(JSON.stringify({event:'command',func:'playVideo',args:[]}),      'https://www.youtube.com');
+    } catch(_) {}
+  };
+  _send(); setTimeout(_send, 300);
+}
+
 // ── Kill helpers (stops audio, removes iframe from DOM) ───────────────────────
 function _killDJIframe() {
   const ifr = id('dj-yt-iframe');
@@ -4926,17 +4997,34 @@ function setLyricsMode(mode) {
         `start=${startSec}`,
         `origin=${encodeURIComponent(origin)}`
       ].join('&');
-      slot.innerHTML = `<iframe
+      slot.innerHTML = `<iframe id="lyrics-slot-iframe"
         src="https://www.youtube.com/embed/${videoId}?${params}"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
         allowfullscreen style="width:100%;height:100%;border:none;display:block;"></iframe>`;
-      // Silence the main player
-      _muteActivePlayer();
-      // After main player has muted, unmute the slot so it becomes the audio source
+      // Pause (not just mute) the background player so it stops advancing the
+      // karaoke clock — the slot iframe is now the single source of truth.
+      _pauseActivePlayer();
+      // Handshake the slot so it emits infoDelivery events we can listen to.
+      const slotIfrNow = id('lyrics-slot-iframe');
+      const yt = 'https://www.youtube.com';
+      const _slotHs = () => {
+        const ifr = id('lyrics-slot-iframe');
+        if (!ifr) return;
+        try {
+          ifr.contentWindow.postMessage(JSON.stringify({event:'listening'}), yt);
+          ifr.contentWindow.postMessage(JSON.stringify({event:'command', func:'addEventListener', args:['infoDelivery']}), yt);
+          ifr.contentWindow.postMessage(JSON.stringify({event:'command', func:'addEventListener', args:['onStateChange']}), yt);
+        } catch(_) {}
+      };
+      if (slotIfrNow) slotIfrNow.addEventListener('load', _slotHs);
+      setTimeout(_slotHs, 800);
+      setTimeout(_slotHs, 2000);
+      ensureDJPostMessageListener();
+      // After main player has paused, unmute the slot so it becomes the audio source
       _karaokeUnmuteTimer = setTimeout(() => {
         _karaokeUnmuteTimer = null;
         const modal   = id('lyrics-modal');
-        const slotIfr = document.querySelector('#lyrics-modal-video-slot iframe');
+        const slotIfr = id('lyrics-slot-iframe');
         if (slotIfr && modal && !modal.classList.contains('hidden')) {
           try {
             slotIfr.contentWindow.postMessage(
@@ -4950,10 +5038,12 @@ function setLyricsMode(mode) {
       slot.classList.add('hidden');
     }
   } else {
-    // Immersive mode: destroy slot iframe and restore main player audio
+    // Immersive mode: destroy slot iframe and resume main player from the last
+    // timestamp the slot reached (so audio continues where the user left off).
     slot.innerHTML = '';
     slot.classList.add('hidden');
-    _unmuteActivePlayer();
+    const resumeAt = _miniPlayerMode === 'dj' ? _djLastTime : _catLastTime;
+    _resumeActivePlayer(resumeAt);
   }
 }
 
@@ -4983,10 +5073,17 @@ function closeLyricsModal() {
     const btn = id('tap-sync-btn');
     if (btn) { btn.textContent = '🎯 Sync'; btn.onclick = startTapSync; }
   }
-  // Destroy slot iframe and restore original player audio
+  // Destroy slot iframe and resume the main player from the last timestamp the
+  // slot reached, so what the user hears/sees stays in sync with the karaoke.
   const slot = id('lyrics-modal-video-slot');
+  const slotWasActive = !!slot && !slot.classList.contains('hidden');
   if (slot) { slot.innerHTML = ''; slot.classList.add('hidden'); }
-  _unmuteActivePlayer();
+  if (slotWasActive) {
+    const resumeAt = _miniPlayerMode === 'dj' ? _djLastTime : _catLastTime;
+    _resumeActivePlayer(resumeAt);
+  } else {
+    _unmuteActivePlayer();
+  }
   // Reset slide transform so next open starts fresh
   const content = lyricsContentEl();
   const panel   = lyricsScrollEl();
